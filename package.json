@@ -6,6 +6,9 @@
   "scripts": {
     "start": "node bot.js"
   },
+  "engines": {
+    "node": "18"
+  },
   "keywords": [
     "telegram",
     "bot"
