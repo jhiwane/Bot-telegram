@@ -1,0 +1,20 @@
+{
+  "name": "bot-telegram-modern",
+  "version": "1.0.0",
+  "description": "Bot Telegram dengan fitur melimpah dan desain modern.",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "keywords": [
+    "telegram",
+    "bot"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "node-telegram-bot-api": "^0.66.0"
+  }
+}
