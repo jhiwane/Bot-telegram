@@ -1,188 +1,222 @@
 const express = require('express');
-const { Telegraf } = require('telegraf');
+const { Telegraf, Markup } = require('telegraf');
 const admin = require('firebase-admin');
 require('dotenv').config();
 
-// --- 1. SETUP FIREBASE ADMIN (KUNCI MASTER) ---
-// Kita akan menaruh kunci JSON di Environment Variable Railway nanti
+// SETUP FIREBASE
 const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
-});
-
+admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 const db = admin.firestore();
 
-// --- 2. SETUP BOT TELEGRAM ---
+// SETUP BOT
 const bot = new Telegraf(process.env.BOT_TOKEN);
-const ADMIN_ID = process.env.ADMIN_ID; // ID Telegram kamu agar orang lain gak bisa bajak bot
+const ADMIN_ID = process.env.ADMIN_ID;
 
-// Middleware: Cek apakah yang chat adalah Owner?
+// MIDDLEWARE AUTH
 const isAdmin = (ctx, next) => {
-    if (String(ctx.from.id) === ADMIN_ID) return next();
-    return ctx.reply("⛔ Eits! Kamu bukan admin. Pergi sana!");
+    if (String(ctx.from?.id) === ADMIN_ID) return next();
+    return ctx.reply("⛔ Akses Ditolak!");
 };
 
-// --- MENU UTAMA ---
-bot.start((ctx) => ctx.reply(`
-🤖 *PANEL ADMIN MANGA STORE* 🤖
-Selamat datang, Bos!
-
-*DAFTAR PERINTAH:*
-
-📦 *MANAJEMEN PRODUK:*
-/tambah [nama] | [harga] | [url_gambar] | [deskripsi]
-/list - Lihat semua ID produk
-/edit [id] [field] [value]
-/hapus [id]
-
-📈 *MANIPULASI STATS:*
-/fake [id] [views] [sold]
-(Contoh: /fake 7a8b9c 1000 50)
-
-💰 *ORDERAN:*
-/cek [id_order] - Lihat detail order
-/acc [id_order] [konten_rahasia] - Terima & Kirim Data ke User
-/tolak [id_order] - Batalkan order
-`));
-
-// --- LOGIC PRODUK ---
-bot.command('tambah', isAdmin, async (ctx) => {
-    try {
-        const text = ctx.message.text.replace('/tambah ', '');
-        const [name, price, image, desc] = text.split('|').map(t => t.trim());
-
-        if (!name || !price || !image) return ctx.reply("❌ Format Salah!\nContoh: /tambah Akun ML | 50000 | https://foto.com/a.jpg | Full Skin");
-
-        await db.collection('products').add({
-            name,
-            price: parseInt(price),
-            image,
-            desc: desc || "Tidak ada deskripsi",
-            view: 0,
-            sold: 0,
-            variations: [], // Default kosong dulu
-            createdAt: new Date()
-        });
-        ctx.reply(`✅ Sukses Upload: ${name}`);
-    } catch (e) { ctx.reply(`Error: ${e.message}`); }
-});
-
-bot.command('list', isAdmin, async (ctx) => {
-    const snap = await db.collection('products').get();
-    if (snap.empty) return ctx.reply("Toko masih kosong bos.");
+// --- 1. THE WATCHER (MATA-MATA DATABASE) ---
+// Ini rahasianya. Bot memantau orderan baru secara realtime.
+const startWatcher = () => {
+    console.log("Mata-mata diaktifkan...");
     
-    let msg = "📦 *DATABASE PRODUK:*\n";
-    snap.forEach(doc => {
-        const d = doc.data();
-        msg += `\n🆔 \`${doc.id}\`\n📌 ${d.name}\n💰 Rp ${d.price}\n👁 ${d.view} | 🛒 ${d.sold}\n------------------`;
-    });
-    // Telegram melimit pesan panjang, hati-hati jika produk ribuan (bisa dipotong)
-    ctx.replyWithMarkdown(msg);
-});
-
-bot.command('edit', isAdmin, async (ctx) => {
-    // Format: /edit ID field value
-    const parts = ctx.message.text.split(' ');
-    if (parts.length < 4) return ctx.reply("Format: /edit [ID] [field] [value]");
-    
-    const id = parts[1];
-    const field = parts[2];
-    let value = parts.slice(3).join(' ');
-
-    // Auto convert ke number jika field harga/view/sold
-    if(['price','view','sold'].includes(field)) value = parseInt(value);
-
-    try {
-        await db.collection('products').doc(id).update({ [field]: value });
-        ctx.reply(`✅ Berhasil ubah ${field} jadi ${value}`);
-    } catch(e) { ctx.reply("❌ Gagal. ID salah mungkin?"); }
-});
-
-bot.command('hapus', isAdmin, async (ctx) => {
-    const id = ctx.message.text.split(' ')[1];
-    if(!id) return ctx.reply("Mana ID nya?");
-    await db.collection('products').doc(id).delete();
-    ctx.reply("🗑️ Produk dihapus selamanya.");
-});
-
-// --- LOGIC MANIPULASI (BIAR RAME) ---
-bot.command('fake', isAdmin, async (ctx) => {
-    const [_, id, view, sold] = ctx.message.text.split(' ');
-    if(!id) return ctx.reply("Format: /fake [ID] [View] [Sold]");
-    
-    await db.collection('products').doc(id).update({
-        view: parseInt(view) || 0,
-        sold: parseInt(sold) || 0
-    });
-    ctx.reply("😎 Data palsu berhasil disuntikkan!");
-});
-
-// --- LOGIC ORDERAN (PENTING) ---
-bot.command('cek', isAdmin, async (ctx) => {
-    const id = ctx.message.text.split(' ')[1];
-    if(!id) return ctx.reply("Mana ID Order?");
-    
-    const doc = await db.collection('orders').doc(id).get();
-    if(!doc.exists) return ctx.reply("Order ga ketemu.");
-    
-    const d = doc.data();
-    let msg = `🧾 *DETAIL ORDER*\nUser: ${d.buyerPhone}\nTotal: ${d.total}\nStatus: ${d.status}\n\nItem:\n`;
-    d.items.forEach(i => msg += `- ${i.name} x${i.qty}\n`);
-    ctx.reply(msg);
-});
-
-bot.command('acc', isAdmin, async (ctx) => {
-    // Format: /acc [ORDER_ID] [KONTEN RAHASIA]
-    // Contoh: /acc uY7s8a9 User: admin Pass: 123
-    const parts = ctx.message.text.split(' ');
-    const id = parts[1];
-    const content = parts.slice(2).join(' ');
-
-    if(!id) return ctx.reply("Mana ID nya bos?");
-    
-    try {
-        const orderRef = db.collection('orders').doc(id);
-        const orderSnap = await orderRef.get();
-        
-        if(!orderSnap.exists) return ctx.reply("Order ga ada.");
-        
-        // 1. Update Status jadi Success & Masukkan Konten
-        await orderRef.update({
-            status: 'success',
-            content: content || "Transaksi Berhasil! Terima kasih."
-        });
-
-        // 2. Tambah Counter Sold di Produk Terkait (Otomatis)
-        const items = orderSnap.data().items;
-        items.forEach(async (item) => {
-            if(item.id) {
-                await db.collection('products').doc(item.id).update({
-                    sold: admin.firestore.FieldValue.increment(item.qty)
-                });
+    // Pantau Order PENDING (Manual Transfer)
+    db.collection('orders').where('status', '==', 'pending').onSnapshot(snapshot => {
+        snapshot.docChanges().forEach(change => {
+            if (change.type === 'added') {
+                const data = change.doc.data();
+                const orderId = change.doc.id;
+                notifyNewOrder(orderId, data, 'MANUAL');
             }
         });
+    });
 
-        ctx.reply(`✅ ORDER ${id} DITERIMA!\nKonten rahasia sudah dikirim ke panel member.`);
-    } catch(e) { ctx.reply(`❌ Error: ${e.message}`); }
+    // Pantau Order SUCCESS (Saldo - Langsung Kirim Data)
+    db.collection('orders').where('status', '==', 'success').where('processed', '==', false).onSnapshot(snapshot => {
+        snapshot.docChanges().forEach(change => {
+            if (change.type === 'added') {
+                const data = change.doc.data();
+                const orderId = change.doc.id;
+                // Tandai sudah diproses agar tidak notif 2x
+                db.collection('orders').doc(orderId).update({ processed: true });
+                notifyNewOrder(orderId, data, 'SALDO (AUTO)');
+                // Auto fetch content untuk saldo
+                autoFulfillOrder(orderId, data);
+            }
+        });
+    });
+
+    // Pantau KOMPLAIN
+    db.collection('orders').where('complain', '==', true).where('complainResolved', '==', false).onSnapshot(snapshot => {
+        snapshot.docChanges().forEach(change => {
+            if (change.type === 'added') {
+                const data = change.doc.data();
+                bot.telegram.sendMessage(ADMIN_ID, `⚠️ *ADA KOMPLAIN!* ⚠️\nID: \`${change.doc.id}\`\nUser: ${data.buyerPhone}\nCek segera!`, {parse_mode:'Markdown'});
+            }
+        });
+    });
+};
+
+// --- 2. LOGIC NOTIFIKASI & PROSES ---
+
+const notifyNewOrder = (id, data, type) => {
+    let itemText = "";
+    data.items.forEach(i => itemText += `- ${i.name} (${i.variantName||'-'}) x${i.qty}\n`);
+    
+    const msg = `🔔 *ORDER BARU (${type})*\n🆔 \`${id}\`\n👤 ${data.buyerPhone}\n💰 Rp ${data.total.toLocaleString()}\n\n🛒 *Item:*\n${itemText}`;
+    
+    const buttons = [];
+    if (type === 'MANUAL') {
+        buttons.push(Markup.button.callback('✅ ACC & PROSES', `acc_${id}`));
+        buttons.push(Markup.button.callback('❌ TOLAK', `tolak_${id}`));
+    } else {
+        buttons.push(Markup.button.callback('🔍 CEK STATUS', `cek_${id}`));
+    }
+
+    bot.telegram.sendMessage(ADMIN_ID, msg, Markup.inlineKeyboard([buttons], { columns: 2 }).resize());
+};
+
+// --- 3. AUTO FULFILLMENT (OTAK CERDAS) ---
+const autoFulfillOrder = async (orderId, orderData, isManualAcc = false) => {
+    try {
+        let fulfilledItems = [];
+        let needsRevision = false;
+        let finalMessageToUser = "";
+
+        // Loop setiap item untuk cari kontennya di database Produk
+        for (const item of orderData.items) {
+            let contentFound = null;
+
+            // Cari Produk Master
+            const prodSnap = await db.collection('products').doc(item.id).get();
+            if (prodSnap.exists) {
+                const prodData = prodSnap.data();
+                
+                // Cek apakah ini variasi?
+                if (item.variantName && prodData.variations) {
+                    const variant = prodData.variations.find(v => v.name === item.variantName);
+                    if (variant && variant.content) contentFound = variant.content;
+                }
+                
+                // Jika tidak ketemu di variasi, atau tidak ada variasi, cek konten utama
+                if (!contentFound && prodData.content) {
+                    contentFound = prodData.content;
+                }
+            }
+
+            if (contentFound) {
+                fulfilledItems.push({ ...item, content: contentFound });
+                finalMessageToUser += `📦 *${item.name}*: ${contentFound}\n`;
+            } else {
+                fulfilledItems.push({ ...item, content: null }); // Kosong
+                needsRevision = true;
+            }
+        }
+
+        // UPDATE ORDER DI FIREBASE
+        await db.collection('orders').doc(orderId).update({
+            items: fulfilledItems,
+            status: 'success', // Jadi sukses agar user bisa liat di web
+            processed: true
+        });
+
+        // INCREMENT SOLD COUNT
+        orderData.items.forEach(async (item) => {
+            await db.collection('products').doc(item.id).update({ sold: admin.firestore.FieldValue.increment(item.qty) });
+        });
+
+        // NOTIFIKASI BALIK KE ADMIN
+        if (needsRevision) {
+            bot.telegram.sendMessage(ADMIN_ID, `⚠️ *ORDER ${orderId} BUTUH REVISI!*\nAda item yang kontennya kosong di database. Silakan update manual.\n\nKetik: /update ${orderId} [urutan_item] [konten]`);
+        } else {
+            bot.telegram.sendMessage(ADMIN_ID, `✅ *ORDER ${orderId} SELESAI OTOMATIS!*\nData terkirim ke web.`);
+            // SEND WA OTOMATIS (Simulasi Link Click karena keterbatasan server)
+            const waText = `Halo kak! Orderan *${orderId}* SUKSES.\n\n${finalMessageToUser}\nTerima kasih!`;
+            const waLink = `https://wa.me/${orderData.buyerPhone.replace(/^0/,'62')}?text=${encodeURIComponent(waText)}`;
+            
+            bot.telegram.sendMessage(ADMIN_ID, "Klik tombol di bawah untuk kirim WA ke pembeli (Semi-Auto):", 
+                Markup.inlineKeyboard([Markup.button.url('📲 KIRIM WA SEKARANG', waLink)])
+            );
+        }
+
+    } catch (e) {
+        console.error(e);
+        bot.telegram.sendMessage(ADMIN_ID, `❌ Error Auto Fulfill: ${e.message}`);
+    }
+};
+
+// --- 4. ACTION HANDLERS ---
+bot.action(/^acc_(.+)$/, async (ctx) => {
+    const orderId = ctx.match[1];
+    ctx.answerCbQuery("Memproses...");
+    ctx.editMessageText(`⏳ Memproses Order ${orderId}... Mencari data produk...`);
+    
+    const doc = await db.collection('orders').doc(orderId).get();
+    if (!doc.exists) return ctx.reply("Order hilang.");
+    
+    // Jalankan logika Cerdas
+    await autoFulfillOrder(orderId, doc.data(), true);
 });
 
-bot.command('tolak', isAdmin, async (ctx) => {
-    const id = ctx.message.text.split(' ')[1];
-    await db.collection('orders').doc(id).update({ status: 'failed' });
-    ctx.reply("🚫 Order ditolak.");
+bot.action(/^tolak_(.+)$/, async (ctx) => {
+    const orderId = ctx.match[1];
+    await db.collection('orders').doc(orderId).update({ status: 'failed' });
+    ctx.editMessageText(`🚫 Order ${orderId} Ditolak.`);
 });
 
-// --- 3. SERVER EXPRESS (Agar Railway tidak mati) ---
+// --- 5. MANUAL UPDATE (REVISI) ---
+// Jika konten kosong, admin bisa isi manual lewat bot
+bot.command('update', isAdmin, async (ctx) => {
+    // Format: /update [ORDER_ID] [INDEX_ITEM_MULAI_0] [KONTEN]
+    // Contoh: /update uY7a8 0 Akun:user/pass
+    const args = ctx.message.text.split(' ');
+    const orderId = args[1];
+    const itemIndex = parseInt(args[2]);
+    const content = args.slice(3).join(' ');
+
+    if (!orderId || isNaN(itemIndex) || !content) return ctx.reply("Format: /update [ID] [IndexItem] [Konten]");
+
+    try {
+        const docRef = db.collection('orders').doc(orderId);
+        const docSnap = await docRef.get();
+        if(!docSnap.exists) return ctx.reply("Order ga ada.");
+
+        let items = docSnap.data().items;
+        if (!items[itemIndex]) return ctx.reply("Item index ga ketemu.");
+
+        // Update konten item spesifik
+        items[itemIndex].content = content;
+        
+        await docRef.update({ items: items });
+        ctx.reply(`✅ Item ke-${itemIndex} di Order ${orderId} berhasil diupdate!`);
+    } catch(e) { ctx.reply("Error update."); }
+});
+
+// --- 6. COMMAND TAMBAH PRODUK (DENGAN KONTEN) ---
+bot.command('tambah', isAdmin, async (ctx) => {
+    // Format Baru: nama | harga | image | deskripsi | KONTEN_RAHASIA
+    const text = ctx.message.text.replace('/tambah ', '');
+    const [name, price, image, desc, content] = text.split('|').map(t => t.trim());
+
+    if (!name || !price) return ctx.reply("Format: /tambah Nama | Harga | ImgURL | Desc | KontenRahasia");
+
+    await db.collection('products').add({
+        name, price: parseInt(price), image, desc, 
+        content: content || "", // Simpan konten di sini
+        view: 0, sold: 0, variations: [], createdAt: new Date()
+    });
+    ctx.reply("✅ Produk + Konten tersimpan!");
+});
+
+// --- SERVER INIT ---
 const app = express();
-app.get('/', (req, res) => res.send('Bot Manga Store Aktif!'));
-
+app.get('/', (req, res) => res.send('Bot Watcher Active'));
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Server jalan di port ${PORT}`);
+    console.log(`Server running port ${PORT}`);
+    startWatcher(); // JALANKAN MATA-MATA
     bot.launch();
 });
-
-// Graceful Stop
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
