@@ -125,53 +125,103 @@ app.post('/api/confirm-manual', async (req, res) => {
     res.json({ status: 'ok', message: 'Sinyal diterima server' });
 });
 
-// LOGIKA: Auto Fulfill (Kirim Konten)
+// --- 5. LOGIKA BOT (AUTO FULFILL - VERSI ANTI MACET) ---
 const autoFulfillOrder = async (orderId, orderData) => {
     console.log(`⚙️ [LOGIC] Memproses Order ${orderId}`);
+    
     try {
-        let items = [], needsRev = false, msgLog = "";
-        
+        let fulfilledItems = [];
+        let needsRevision = false;
+        let msgLog = "";
+
+        // Pastikan orderData.items ada isinya
+        if (!orderData.items || !Array.isArray(orderData.items)) {
+            bot.telegram.sendMessage(ADMIN_ID, `⚠️ Order ${orderId} struktur datanya rusak (tidak ada items).`);
+            return;
+        }
+
         for (const item of orderData.items) {
             let content = null;
-            const snap = await db.collection('products').doc(item.id).get();
-            
-            if (snap.exists) {
-                const p = snap.data();
-                if (item.variantName && p.variations) {
-                    const v = p.variations.find(x => x.name === item.variantName);
-                    if (v && v.content) content = v.content;
+            let statusItem = "❓";
+
+            try {
+                // Cek ID Produk valid atau tidak
+                if (!item.id) throw new Error("ID Produk hilang");
+
+                const snap = await db.collection('products').doc(item.id).get();
+                
+                if (snap.exists) {
+                    const p = snap.data();
+                    
+                    // Cek Variasi dulu
+                    if (item.variantName && p.variations && Array.isArray(p.variations)) {
+                        const v = p.variations.find(x => x.name === item.variantName);
+                        if (v && v.content) {
+                            content = v.content;
+                            statusItem = "✅ Varian";
+                        }
+                    }
+                    
+                    // Jika variasi kosong/tidak ketemu, cek konten utama
+                    if (!content && p.content) {
+                        content = p.content;
+                        statusItem = "✅ Utama";
+                    }
+                } else {
+                    statusItem = "❌ Produk Dihapus";
                 }
-                if (!content && p.content) content = p.content;
+            } catch (err) {
+                console.error(`Error item ${item.name}:`, err.message);
+                statusItem = "❌ Error DB";
             }
 
+            // Hasil Akhir per Item
             if (content) {
-                items.push({ ...item, content });
-                msgLog += `✅ ${item.name}: OK\n`;
+                fulfilledItems.push({ ...item, content: content });
+                msgLog += `${statusItem} ${item.name}: Terkirim\n`;
             } else {
-                items.push({ ...item, content: null });
-                needsRev = true;
-                msgLog += `⚠️ ${item.name}: KOSONG\n`;
+                // KOSONG? Tetap push tapi content null
+                fulfilledItems.push({ ...item, content: null });
+                needsRevision = true;
+                msgLog += `⚠️ ${item.name}: KOSONG / HILANG\n`;
             }
         }
 
-        await db.collection('orders').doc(orderId).update({ items, status: 'success', processed: true });
+        // UPDATE DATABASE (WAJIB JALAN MESKIPUN ADA YANG KOSONG)
+        // Kita set status 'success' agar user bisa lihat di history, meski isinya masih kosong (pending revisi)
+        await db.collection('orders').doc(orderId).update({ 
+            items: fulfilledItems, 
+            status: 'success', 
+            processed: true 
+        });
         
-        // Update Sold
+        // Update Sold Count (Hanya yang produknya ketemu)
         orderData.items.forEach(async (i) => {
-            if(i.id) await db.collection('products').doc(i.id).update({sold: admin.firestore.FieldValue.increment(i.qty)});
+            if(i.id) {
+                try {
+                    await db.collection('products').doc(i.id).update({sold: admin.firestore.FieldValue.increment(i.qty)});
+                } catch(e) {} // Abaikan error sold count biar ga macet
+            }
         });
 
-        const replyMsg = needsRev 
-            ? `⚠️ *REVISI PERLU!* Order ${orderId}\n${msgLog}\nKetik: \`/update ${orderId} 0 IsiData\`` 
-            : `✅ *ORDER SELESAI!* ${orderId}\nData sudah masuk web user.`;
-            
-        bot.telegram.sendMessage(ADMIN_ID, replyMsg, { parse_mode: 'Markdown' });
+        // LAPORAN FINAL KE TELEGRAM
+        if (needsRevision) {
+            bot.telegram.sendMessage(ADMIN_ID, 
+                `⚠️ *ORDER ${orderId} SELESAI TAPI BUTUH REVISI!*\n\n${msgLog}\n👇 *CARA ISI MANUAL:*\nKetik: \`/update ${orderId} [Urutan 0,1,2..] [DataBaru]\``, 
+                { parse_mode: 'Markdown' }
+            );
+        } else {
+            bot.telegram.sendMessage(ADMIN_ID, 
+                `✅ *ORDER ${orderId} SUKSES TOTAL!*\n${msgLog}`, 
+                { parse_mode: 'Markdown' }
+            );
+        }
 
     } catch (e) {
-        console.error("❌ [LOGIC] Error Fulfill:", e);
+        console.error("❌ [LOGIC] Fatal Error Fulfill:", e);
+        bot.telegram.sendMessage(ADMIN_ID, `☠️ CRITICAL ERROR ORDER ${orderId}: ${e.message}`);
     }
 };
-
 // ==========================================
 // BAGIAN 4: SETUP BOT LISTENER
 // ==========================================
