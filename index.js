@@ -4,16 +4,15 @@ const admin = require('firebase-admin');
 const cors = require('cors'); 
 require('dotenv').config();
 
-// --- 1. SETUP SERVER WEB (PRIORITAS UTAMA) ---
-// Server ini HARUS nyala duluan supaya Railway tidak mematikan container.
+// --- 1. SETUP SERVER WEB (PRIORITAS UTAMA - ANTI MATI) ---
 const app = express();
 app.use(cors({ origin: '*' })); 
 app.use(express.json());
 
-// Endpoint Cek Nyawa (Penting buat Railway Health Check)
+// Endpoint Cek Nyawa (Agar Railway senang)
 app.get('/', (req, res) => {
-    const statusBot = bot && bot.botInfo ? `ONLINE (${bot.botInfo.username})` : 'MENUNGGU GILIRAN...';
-    res.send(`SERVER JSN-02 AKTIF! Status Bot: ${statusBot}`);
+    const status = bot && bot.botInfo ? `ONLINE (@${bot.botInfo.username})` : 'SEDANG STARTING...';
+    res.send(`SERVER JSN-02 UTAMA AKTIF! Status Bot: ${status}`);
 });
 
 // --- 2. SETUP FIREBASE ---
@@ -34,17 +33,92 @@ const db = admin.firestore();
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const ADMIN_ID = process.env.ADMIN_ID;
 
-// --- 4. API CONFIRM MANUAL (Webhook dari Frontend) ---
+const isAdmin = (ctx, next) => {
+    if (String(ctx.from?.id) === ADMIN_ID) return next();
+};
+
+// --- 4. LOGIKA OTAK CERDAS (AUTO FULFILLMENT) ---
+const autoFulfillOrder = async (orderId, orderData) => {
+    try {
+        console.log(`⚙️ Memproses Konten Otomatis: ${orderId}`);
+        
+        let fulfilledItems = [];
+        let needsRevision = false;
+        let messageLog = "";
+
+        // Loop setiap item yang dibeli user
+        for (const item of orderData.items) {
+            let contentFound = null;
+
+            // Cek Database Produk
+            const prodSnap = await db.collection('products').doc(item.id).get();
+            
+            if (prodSnap.exists) {
+                const prodData = prodSnap.data();
+                
+                // 1. Cek Variasi
+                if (item.variantName && prodData.variations) {
+                    const variant = prodData.variations.find(v => v.name === item.variantName);
+                    if (variant && variant.content) contentFound = variant.content;
+                }
+                
+                // 2. Cek Utama
+                if (!contentFound && prodData.content) {
+                    contentFound = prodData.content;
+                }
+            }
+
+            if (contentFound) {
+                fulfilledItems.push({ ...item, content: contentFound });
+                messageLog += `✅ ${item.name}: OK (Data Terkirim)\n`;
+            } else {
+                fulfilledItems.push({ ...item, content: null });
+                needsRevision = true;
+                messageLog += `⚠️ ${item.name}: KOSONG (Butuh Isi Manual)\n`;
+            }
+        }
+
+        // Update Firebase (User langsung lihat di Web)
+        await db.collection('orders').doc(orderId).update({
+            items: fulfilledItems,
+            status: 'success',
+            processed: true
+        });
+
+        // Tambah Counter Terjual (Sold)
+        orderData.items.forEach(async (item) => {
+            if(item.id) {
+                await db.collection('products').doc(item.id).update({
+                    sold: admin.firestore.FieldValue.increment(item.qty)
+                });
+            }
+        });
+
+        // Lapor Admin
+        if (needsRevision) {
+            bot.telegram.sendMessage(ADMIN_ID, 
+                `⚠️ *ORDER ${orderId} SELESAI TAPI ADA YG KOSONG!*\n${messageLog}\n👇 *REVISI MANUAL:* \nKetik: \`/update ${orderId} 0 DataAkunBaru\``, 
+                { parse_mode: 'Markdown' }
+            );
+        } else {
+            bot.telegram.sendMessage(ADMIN_ID, 
+                `✅ *ORDER ${orderId} SUKSES SEMPURNA!*\nSemua data sudah masuk ke web user.`,
+                { parse_mode: 'Markdown' }
+            );
+        }
+
+    } catch (e) {
+        console.error("Error Fulfill:", e);
+        bot.telegram.sendMessage(ADMIN_ID, `❌ Gagal Proses Otomatis: ${e.message}`);
+    }
+};
+
+// --- 5. API WEBHOOK (DARI TOMBOL SUDAH BAYAR) ---
 app.post('/api/confirm-manual', async (req, res) => {
     const { orderId, buyerPhone, total, items } = req.body;
-    console.log(`🔔 API HIT: Order ${orderId}`);
+    console.log(`🔔 Webhook Masuk: ${orderId}`);
 
     if(!orderId) return res.status(400).json({ error: 'No ID' });
-
-    // Cek apakah bot sudah siap?
-    if (!bot.botInfo) {
-        return res.status(503).json({ status: 'queued', message: 'Bot sedang restart, data aman.' });
-    }
 
     let txt = "";
     if(Array.isArray(items)) items.forEach(i => txt += `- ${i.name} (${i.variantName||'-'}) x${i.qty}\n`);
@@ -54,79 +128,115 @@ app.post('/api/confirm-manual', async (req, res) => {
     try {
         await bot.telegram.sendMessage(ADMIN_ID, msg, {
             parse_mode: 'Markdown',
-            ...Markup.inlineKeyboard([[Markup.button.callback('✅ ACC', `acc_${orderId}`), Markup.button.callback('❌ TOLAK', `tolak_${orderId}`)]]).resize()
+            ...Markup.inlineKeyboard([
+                [Markup.button.callback('✅ ACC', `acc_${orderId}`), Markup.button.callback('❌ TOLAK', `tolak_${orderId}`)]
+            ]).resize()
         });
         res.json({ status: 'ok' });
     } catch (e) {
-        console.error("Gagal lapor Telegram:", e.message);
-        res.json({ status: 'error', message: e.message });
+        console.error("Gagal lapor TG (Server tetap aman):", e.message);
+        res.json({ status: 'queued', message: 'Bot restart, pesan antri.' });
     }
 });
 
-// --- 5. LOGIKA BOT (Command & Action) ---
-// (Disederhanakan untuk test koneksi dulu)
-bot.start((ctx) => ctx.reply('🤖 BOT ONLINE & SIAP KERJA!'));
+// --- 6. BOT COMMANDS & ACTIONS ---
 
+// Tombol ACC
 bot.action(/^acc_(.+)$/, async (ctx) => {
-    const id = ctx.match[1];
-    ctx.reply(`Sedang memproses Order ${id}... (Logika Database Aktif)`);
-    // Masukkan logika update firebase di sini nanti
-    await db.collection('orders').doc(id).update({ status: 'success' });
-    ctx.reply("✅ Order Sukses!");
+    const orderId = ctx.match[1];
+    ctx.answerCbQuery("Memproses...");
+    ctx.editMessageText(`⏳ Memproses Order \`${orderId}\`...\nMencari stok konten di database...`, {parse_mode:'Markdown'});
+    
+    const doc = await db.collection('orders').doc(orderId).get();
+    if (doc.exists) await autoFulfillOrder(orderId, doc.data());
+    else ctx.reply("❌ Data order hilang.");
 });
 
+// Tombol TOLAK
 bot.action(/^tolak_(.+)$/, async (ctx) => {
-    const id = ctx.match[1];
-    await db.collection('orders').doc(id).update({ status: 'failed' });
-    ctx.editMessageText("🚫 Ditolak.");
+    await db.collection('orders').doc(ctx.match[1]).update({ status: 'failed' });
+    ctx.editMessageText(`🚫 Order Ditolak.`);
 });
 
-// --- 6. START SERVER DENGAN DELAY BOT (SOLUSI BENTROK) ---
+// Admin: Tambah Produk (+Konten)
+bot.command('tambah', isAdmin, async (ctx) => {
+    const text = ctx.message.text.replace('/tambah ', '');
+    const parts = text.split('|').map(t => t.trim());
+    
+    if (parts.length < 3) return ctx.reply("❌ Format: /tambah Nama | Harga | Gambar | Desc | Konten(Opsional)");
+    const [name, price, image, desc, content] = parts;
+
+    await db.collection('products').add({
+        name, price: parseInt(price), image, desc: desc||"", content: content||"", 
+        view: 0, sold: 0, createdAt: new Date()
+    });
+    ctx.reply(`✅ Produk "${name}" Siap Jual!`);
+});
+
+// Admin: Manipulasi Views
+bot.command('fake', isAdmin, async (ctx) => {
+    const [_, id, view, sold] = ctx.message.text.split(' ');
+    if(!id) return ctx.reply("/fake ID VIEW SOLD");
+    await db.collection('products').doc(id).update({ view: parseInt(view), sold: parseInt(sold) });
+    ctx.reply("😎 Data Fake Updated!");
+});
+
+// Admin: Revisi Konten Manual
+bot.command('update', isAdmin, async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    const orderId = args[1];
+    const idx = parseInt(args[2]);
+    const content = args.slice(3).join(' ');
+
+    if(!orderId || isNaN(idx) || !content) return ctx.reply("/update ID INDEX KONTEN");
+
+    const doc = await db.collection('orders').doc(orderId).get();
+    if(!doc.exists) return ctx.reply("Ga ada.");
+
+    let items = doc.data().items;
+    if(items[idx]) {
+        items[idx].content = content;
+        await db.collection('orders').doc(orderId).update({ items, status: 'success' });
+        ctx.reply("✅ Revisi Berhasil! User bisa cek web sekarang.");
+    }
+});
+
+// --- 7. STARTUP SEQUENCE (SERVER DULUAN -> BOT BELAKANGAN) ---
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, () => {
-    console.log(`🚀 SERVER WEB SUDAH JALAN DI PORT ${PORT}`);
-    console.log("⏳ Menunggu 10 detik sebelum menyalakan Bot (Agar sesi lama mati dulu)...");
+    console.log(`🚀 SERVER WEB JALAN DI PORT ${PORT}`);
+    console.log("⏳ Menunggu 10 detik agar sesi bot lama mati total...");
     
-    // TUNDA START BOT 10 DETIK
+    // DELAY START BOT (KUNCI KESTABILAN)
     setTimeout(() => {
-        startBot();
+        startBotSafe();
     }, 10000); 
 });
 
-async function startBot() {
-    if(!process.env.BOT_TOKEN) return console.log("❌ Token Bot Kosong");
+async function startBotSafe() {
+    if(!process.env.BOT_TOKEN) return console.log("❌ Token kosong.");
 
     try {
-        console.log("🔄 Menghapus webhook lama...");
+        console.log("🔄 Hapus webhook lama...");
         await bot.telegram.deleteWebhook({ drop_pending_updates: true });
         
-        console.log("🤖 Sedang login ke Telegram...");
+        console.log("🤖 Login Bot...");
         await bot.launch();
         
-        console.log(`✅ BOT BERHASIL LOGIN! Username: @${bot.botInfo.username}`);
-        // Kirim pesan ke admin tanda bot hidup
-        bot.telegram.sendMessage(ADMIN_ID, "🟢 Sistem JSN-02 Telah Restart & Online!").catch(() => {});
+        console.log(`✅ BOT FINAL ONLINE! Username: @${bot.botInfo.username}`);
+        bot.telegram.sendMessage(ADMIN_ID, "🚀 JSN-02 FULL SYSTEM ONLINE!").catch(()=>{});
 
     } catch (error) {
         if (error.response && error.response.error_code === 409) {
-            console.log("⚠️ Masih Bentrok! Mencoba lagi dalam 5 detik...");
-            setTimeout(startBot, 5000); // Coba lagi
+            console.log("⚠️ Masih bentrok. Coba lagi 5 detik...");
+            setTimeout(startBotSafe, 5000);
         } else {
-            console.error("❌ Bot Gagal:", error.message);
+            console.error("❌ Bot Error:", error.message);
         }
     }
 }
 
-// GRACEFUL SHUTDOWN (PENTING BUAT RAILWAY)
-// Saat Railway mau mematikan server ini, kita matikan bot dulu biar gak nyangkut.
-process.once('SIGINT', () => {
-    console.log("🛑 Mematikan Bot...");
-    bot.stop('SIGINT');
-    process.exit(0);
-});
-process.once('SIGTERM', () => {
-    console.log("🛑 Mematikan Bot...");
-    bot.stop('SIGTERM');
-    process.exit(0);
-});
+// Graceful Stop
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
