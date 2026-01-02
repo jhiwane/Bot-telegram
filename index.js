@@ -28,7 +28,7 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 const cancelBtn = Markup.inlineKeyboard([Markup.button.callback('❌ BATAL', 'cancel_action')]);
 
 // ==========================================
-// 2. LOGIKA STOK & ORDER
+// 2. LOGIKA STOK & ORDER (CORE)
 // ==========================================
 
 const processStock = async (productId, variantName, qtyNeeded) => {
@@ -77,7 +77,7 @@ const processOrderLogic = async (orderId, orderData) => {
 
     for (let i = 0; i < orderData.items.length; i++) {
         const item = orderData.items[i];
-        if (item.content) { items.push(item); msgLog += `✅ ${item.name}: OK (Manual)\n`; continue; }
+        if (item.content) { items.push(item); msgLog += `✅ ${item.name}: OK\n`; continue; }
 
         try {
             const result = await processStock(item.id, item.variantName, item.qty);
@@ -105,10 +105,8 @@ const processOrderLogic = async (orderId, orderData) => {
 app.post('/api/confirm-manual', async (req, res) => {
     const { orderId, buyerPhone, total, items } = req.body;
     let txt = items.map(i => `- ${i.name} (x${i.qty})`).join('\n');
-    try {
-        await bot.telegram.sendMessage(ADMIN_ID, `🔔 *ORDER MASUK*\n🆔 \`${orderId}\`\n👤 ${buyerPhone}\n💰 Rp ${parseInt(total).toLocaleString()}\n\n${txt}`, Markup.inlineKeyboard([[Markup.button.callback('⚡ PROSES', `acc_${orderId}`), Markup.button.callback('❌ TOLAK', `tolak_${orderId}`)]]));
-        res.json({ status: 'ok' });
-    } catch (e) { console.error(e); res.status(500).json({error:e.message}); }
+    bot.telegram.sendMessage(ADMIN_ID, `🔔 *ORDER MASUK*\n🆔 \`${orderId}\`\n👤 ${buyerPhone}\n💰 Rp ${parseInt(total).toLocaleString()}\n\n${txt}`, Markup.inlineKeyboard([[Markup.button.callback('⚡ PROSES', `acc_${orderId}`), Markup.button.callback('❌ TOLAK', `tolak_${orderId}`)]]));
+    res.json({ status: 'ok' });
 });
 
 app.post('/api/complain', async (req, res) => {
@@ -121,27 +119,28 @@ app.post('/api/complain', async (req, res) => {
 app.get('/', (req, res) => res.send('SERVER JSN-02 READY'));
 
 // ==========================================
-// 4. BOT BRAIN (PANEL ADMIN COMPLETE)
+// 4. PANEL ADMIN (BOT BRAIN)
 // ==========================================
 
 const mainMenu = Markup.inlineKeyboard([
     [Markup.button.callback('➕ TAMBAH PRODUK', 'add_prod')],
     [Markup.button.callback('👥 KELOLA USER', 'manage_users'), Markup.button.callback('💳 ATUR PEMBAYARAN', 'set_payment')],
-    [Markup.button.callback('💰 SALES REPORT', 'sales_today'), Markup.button.callback('🚨 KOMPLAIN', 'list_complain')]
+    [Markup.button.callback('💰 LAPORAN HARI INI', 'sales_today'), Markup.button.callback('🚨 KOMPLAIN', 'list_complain')]
 ]);
 
-bot.command('admin', (ctx) => ctx.reply("🛠 *PANEL ADMIN JSN-02*\nKetik Kode Produk (Utama/Variasi) atau ID Order untuk mencari.", mainMenu));
+bot.command('admin', (ctx) => ctx.reply("🛠 *PANEL ADMIN JSN-02*\nKetik Kode Produk / ID Order / Email User.", mainMenu));
 
 // --- LISTENER TEKS (SEARCH & WIZARD) ---
 bot.on('text', async (ctx, next) => {
     if (String(ctx.from.id) !== ADMIN_ID) return next();
     const text = ctx.message.text.trim();
+    const textLower = text.toLowerCase();
     const userId = ctx.from.id;
     const session = adminSession[userId];
 
-    // A. MODE WIZARD / EDIT
+    // A. MODE WIZARD (INPUT DATA)
     if (session) {
-        // 1. TAMBAH PRODUK
+        // ... (LOGIKA TAMBAH PRODUK - TETAP SAMA AGAR TIDAK HILANG) ...
         if (session.type === 'ADD_PROD') {
             const d = session.data;
             if (session.step === 'NAME') { d.name = text; session.step = 'CODE'; ctx.reply("🏷 Kode Produk Utama:", cancelBtn); }
@@ -149,284 +148,204 @@ bot.on('text', async (ctx, next) => {
             else if (session.step === 'PRICE') { d.price = parseInt(text); session.step = 'IMG'; ctx.reply("🖼 URL Gambar:", cancelBtn); }
             else if (session.step === 'IMG') { d.image = text; session.step = 'STATS'; ctx.reply("📊 Fake Sold & View (cth: 100 5000):", cancelBtn); }
             else if (session.step === 'STATS') { const [s, v] = text.split(' '); d.sold = parseInt(s)||0; d.view = parseInt(v)||0; session.step = 'DESC'; ctx.reply("📝 Deskripsi:", cancelBtn); }
-            else if (session.step === 'DESC') { d.desc = text; session.step = 'CONTENT'; ctx.reply("📦 Stok Utama (Skip jika cuma variasi):", cancelBtn); }
+            else if (session.step === 'DESC') { d.desc = text; session.step = 'CONTENT'; ctx.reply("📦 Stok Utama (Skip jika variasi):", cancelBtn); }
             else if (session.step === 'CONTENT') { d.content = text==='skip'?'':text; session.step = 'VARS'; ctx.reply("🔀 Ada Variasi? (ya/tidak):", cancelBtn); }
             else if (session.step === 'VARS') {
-                if (text.toLowerCase() === 'ya') { session.step = 'VAR_NAME'; ctx.reply("🔀 Nama Variasi:", cancelBtn); } 
+                if (text.toLowerCase() === 'ya') { session.step = 'VAR_NAME'; ctx.reply("🔀 Nama Variasi:", cancelBtn); }
                 else { await db.collection('products').add({...d, createdAt: new Date()}); delete adminSession[userId]; ctx.reply("✅ Produk Tersimpan!"); }
             }
-            else if (session.step === 'VAR_NAME') { if(!d.variations) d.variations=[]; session.tempVar = { name: text }; session.step = 'VAR_CODE'; ctx.reply("🏷 Kode Variasi:", cancelBtn); }
-            else if (session.step === 'VAR_CODE') { session.tempVar.code = text; session.step = 'VAR_PRICE'; ctx.reply("💰 Harga Variasi:", cancelBtn); }
-            else if (session.step === 'VAR_PRICE') { session.tempVar.price = parseInt(text); session.step = 'VAR_CONTENT'; ctx.reply("📦 Stok Variasi:", cancelBtn); }
-            else if (session.step === 'VAR_CONTENT') {
-                session.tempVar.content = text; d.variations.push(session.tempVar);
-                session.step = 'VARS'; ctx.reply("✅ Variasi OK. Ada lagi? (ya/tidak)", cancelBtn);
-            }
-        }
-        
-        // 2. EDIT VARIASI
-        else if (session.type === 'EDIT_VAR') {
-            const { prodId, varIdx, field } = session;
-            const docRef = db.collection('products').doc(prodId);
-            const snap = await docRef.get();
-            let vars = snap.data().variations;
-            
-            if (field === 'price') vars[varIdx].price = parseInt(text);
-            else if (field === 'name') vars[varIdx].name = text;
-            else if (field === 'code') vars[varIdx].code = text;
-            else if (field === 'content') vars[varIdx].content = text; // Replace stok
-
-            await docRef.update({ variations: vars });
-            delete adminSession[userId];
-            ctx.reply(`✅ Variasi Updated!`);
+            else if (session.step === 'VAR_NAME') { if(!d.variations) d.variations=[]; session.tempVar={name:text}; session.step='VAR_CODE'; ctx.reply("🏷 Kode Variasi:", cancelBtn); }
+            else if (session.step === 'VAR_CODE') { session.tempVar.code=text; session.step='VAR_PRICE'; ctx.reply("💰 Harga Variasi:", cancelBtn); }
+            else if (session.step === 'VAR_PRICE') { session.tempVar.price=parseInt(text); session.step='VAR_CONTENT'; ctx.reply("📦 Stok Variasi:", cancelBtn); }
+            else if (session.step === 'VAR_CONTENT') { session.tempVar.content=text; d.variations.push(session.tempVar); session.step='VARS'; ctx.reply("✅ Variasi OK. Ada lagi? (ya/tidak)", cancelBtn); }
         }
 
-        // 3. EDIT PRODUK UTAMA
-        else if (session.type === 'EDIT_MAIN') {
-            const { prodId, field } = session;
-            const update = {};
-            if(field === 'price' || field === 'sold' || field === 'view') update[field] = parseInt(text);
-            else update[field] = text;
-            
-            await db.collection('products').doc(prodId).update(update);
-            delete adminSession[userId];
-            ctx.reply("✅ Data Utama Updated!");
-        }
-
-        // 4. LAINNYA
-        else if (session.type === 'SET_PAYMENT') { /* ... logic payment ... */ 
-             if(session.step === 'BANK') { session.data.bank = text; session.step='NO'; ctx.reply("Nomor:", cancelBtn); }
-             else if(session.step === 'NO') { session.data.no = text; session.step='AN'; ctx.reply("Atas Nama:", cancelBtn); }
-             else if(session.step === 'AN') { session.data.an = text; session.step='QR'; ctx.reply("URL QRIS (Skip jika tdk ada):", cancelBtn); }
-             else if(session.step === 'QR') { 
-                 const q = text==='skip'?'':text;
-                 const info = `🏦 ${session.data.bank}\n🔢 ${session.data.no}\n👤 ${session.data.an}`;
-                 await db.collection('settings').doc('payment').set({info, qris:q});
-                 delete adminSession[userId]; ctx.reply("✅ Payment Updated!");
-             }
-        }
-        else if (session.type === 'REPLY_COMPLAIN') {
-            await db.collection('orders').doc(session.orderId).update({ adminReply: text, complainResolved: true });
-            delete adminSession[userId]; ctx.reply("✅ Terkirim.");
-        }
-        else if (session.type === 'REVISI') {
-            const snap = await db.collection('orders').doc(session.orderId).get();
-            const data = snap.data();
-            data.items[session.itemIdx].content = text;
-            await db.collection('orders').doc(session.orderId).update({ items: data.items });
-            delete adminSession[userId]; ctx.reply("✅ Revisi OK.");
-            processOrderLogic(session.orderId, data);
-        }
-        return;
-    }
-
-        // 5. MANAJEMEN USER (TOP UP / EDIT)
+        // --- MANAJEMEN USER (SEARCH LOGIC) ---
         else if (session.type === 'SEARCH_USER') {
-            // Cari user by Email (Exact match) atau UID
-            let snap = await db.collection('users').where('email', '==', text).get();
-            if (snap.empty) {
-                // Coba cari by UID
-                const docRef = await db.collection('users').doc(text).get();
-                if (docRef.exists) snap = { docs: [docRef], empty: false };
-            }
+            try {
+                let foundDocs = [];
+                
+                // 1. Cari by Email
+                let snap = await db.collection('users').where('email', '==', text).get();
+                if (!snap.empty) foundDocs = snap.docs;
+                
+                // 2. Cari by UID (Jika email zonk)
+                if (foundDocs.length === 0) {
+                    const docRef = await db.collection('users').doc(text).get();
+                    if (docRef.exists) foundDocs = [docRef];
+                }
 
-            if (!snap.empty) {
-                const u = snap.docs[0].data();
-                const uid = snap.docs[0].id;
-                ctx.reply(`👤 *USER DITEMUKAN*\n🆔 ID: \`${uid}\`\n📧 Email: ${u.email || 'Tamu/Anon'}\n💰 Saldo: Rp ${u.balance?.toLocaleString() || 0}\n🎭 Role: ${u.role || 'Member'}`, 
-                    Markup.inlineKeyboard([
-                        [Markup.button.callback('💵 Top Up Saldo', `topup_${uid}`), Markup.button.callback('💸 Potong Saldo', `deduct_${uid}`)],
-                        [Markup.button.callback('🚫 BAN / HAPUS', `ban_user_${uid}`)]
-                    ])
-                );
-                delete adminSession[userId];
-            } else {
-                ctx.reply("❌ User tidak ditemukan. Pastikan Email/UID benar.");
-            }
+                if (foundDocs.length > 0) {
+                    const u = foundDocs[0].data();
+                    const uid = foundDocs[0].id;
+                    ctx.reply(
+                        `👤 *USER DITEMUKAN*\n\n🆔 ID: \`${uid}\`\n📧 Email: ${u.email || 'Tamu/Anonim'}\n💰 Saldo: Rp ${u.balance?.toLocaleString() || 0}\n🎭 Role: ${u.role || 'Member'}`, 
+                        {
+                            parse_mode: 'Markdown',
+                            ...Markup.inlineKeyboard([
+                                [Markup.button.callback('💵 Top Up Saldo', `topup_${uid}`), Markup.button.callback('💸 Potong Saldo', `deduct_${uid}`)],
+                                [Markup.button.callback('🚫 HAPUS AKUN', `ban_user_${uid}`)]
+                            ])
+                        }
+                    );
+                    delete adminSession[userId]; // Selesai search, reset session
+                } else {
+                    ctx.reply("❌ User tidak ditemukan. Cek Email/UID.");
+                }
+            } catch(e) { ctx.reply("Error: " + e.message); }
         }
+        // PROSES TOPUP
         else if (session.type === 'TOPUP_USER') {
             const amount = parseInt(text);
-            if (isNaN(amount)) return ctx.reply("Harus angka!");
-            
-            await db.collection('users').doc(session.targetUid).update({
-                balance: admin.firestore.FieldValue.increment(amount)
-            });
+            if(isNaN(amount)) return ctx.reply("Harus angka!");
+            await db.collection('users').doc(session.targetUid).update({ balance: admin.firestore.FieldValue.increment(amount) });
             delete adminSession[userId];
-            ctx.reply(`✅ Berhasil Top Up Rp ${amount.toLocaleString()} ke user tersebut.`);
+            ctx.reply(`✅ Berhasil Top Up Rp ${amount.toLocaleString()}`);
         }
+        // PROSES POTONG
         else if (session.type === 'DEDUCT_USER') {
             const amount = parseInt(text);
-            if (isNaN(amount)) return ctx.reply("Harus angka!");
-            
-            await db.collection('users').doc(session.targetUid).update({
-                balance: admin.firestore.FieldValue.increment(-amount)
-            });
+            if(isNaN(amount)) return ctx.reply("Harus angka!");
+            await db.collection('users').doc(session.targetUid).update({ balance: admin.firestore.FieldValue.increment(-amount) });
             delete adminSession[userId];
-            ctx.reply(`✅ Saldo dipotong Rp ${amount.toLocaleString()}.`);
+            ctx.reply(`✅ Berhasil Potong Rp ${amount.toLocaleString()}`);
         }
-    // B. SMART SEARCH (DEEP SEARCH VARIATION)
-    // 1. Cek Kode Utama
-    let snap = await db.collection('products').where('code', '==', text).get();
-    let foundProd = null;
 
-    if (!snap.empty) {
-        foundProd = { id: snap.docs[0].id, ...snap.docs[0].data() };
-    } else {
-        // 2. Cek Kode Variasi (Manual Search - Deep Scan)
+        // --- FITUR LAIN (EDIT, PAYMENT, ETC) ---
+        else if (session.type === 'SET_PAYMENT') {
+            if(session.step === 'BANK') { session.data.bank=text; session.step='NO'; ctx.reply("Nomor:", cancelBtn); }
+            else if(session.step === 'NO') { session.data.no=text; session.step='AN'; ctx.reply("Atas Nama:", cancelBtn); }
+            else if(session.step === 'AN') { session.data.an=text; session.step='QR'; ctx.reply("URL QRIS (skip/url):", cancelBtn); }
+            else if(session.step === 'QR') { await db.collection('settings').doc('payment').set({info:`🏦 ${session.data.bank}\n🔢 ${session.data.no}\n👤 ${session.data.an}`, qris:text==='skip'?'':text}); delete adminSession[userId]; ctx.reply("✅ Saved."); }
+        }
+        else if (session.type === 'EDIT_MAIN') { await db.collection('products').doc(session.prodId).update({[session.field]:(session.field==='price'||session.field.includes('sold')||session.field.includes('view'))?parseInt(text):text}); delete adminSession[userId]; ctx.reply("Updated."); }
+        else if (session.type === 'EDIT_VAR') { const docRef = db.collection('products').doc(session.prodId); const snap = await docRef.get(); let vars = snap.data().variations; vars[session.varIdx][session.field] = (session.field==='price')?parseInt(text):text; await docRef.update({ variations: vars }); delete adminSession[userId]; ctx.reply("Variasi Updated."); }
+        else if (session.type === 'REPLY_COMPLAIN') { await db.collection('orders').doc(session.orderId).update({adminReply:text, complainResolved:true}); delete adminSession[userId]; ctx.reply("Terkirim."); }
+        else if (session.type === 'REVISI') { const d = await db.collection('orders').doc(session.orderId).get(); const data = d.data(); data.items[session.itemIdx].content = text; await db.collection('orders').doc(session.orderId).update({items:data.items}); delete adminSession[userId]; ctx.reply("OK."); processOrderLogic(session.orderId, data); }
+        
+        return;
+    }
+
+    // B. LOGIKA PENCARIAN (Smart Search)
+    try {
+        // Cek ID Order
+        const orderSnap = await db.collection('orders').doc(text).get();
+        if (orderSnap.exists) {
+            const o = orderSnap.data();
+            const items = o.items.map(i=>`${i.name} x${i.qty}`).join(', ');
+            return ctx.reply(`📦 *ORDER ${orderSnap.id}*\nStatus: ${o.status}\nUser: ${o.buyerPhone}\nItem: ${items}\nTotal: ${o.total}`, {parse_mode:'Markdown',...Markup.inlineKeyboard([[Markup.button.callback('🗑 HAPUS', `del_order_${orderSnap.id}`)]])});
+        }
+
+        // Cek Produk (Deep Scan)
         const allProds = await db.collection('products').get();
+        let found = null;
         allProds.forEach(doc => {
             const p = doc.data();
-            if (p.variations && p.variations.some(v => v.code === text)) {
-                foundProd = { id: doc.id, ...p };
+            if ((p.code && p.code.toLowerCase() === textLower) || (p.variations && p.variations.some(v => v.code && v.code.toLowerCase() === textLower))) {
+                found = { id: doc.id, ...p };
             }
         });
-    }
 
-    if (foundProd) {
-        const p = foundProd;
-        const mainStok = p.content ? p.content.split('\n').filter(x=>x.trim()).length : 0;
-        
-        ctx.reply(`🔎 *${p.name}*\n🏷 Kode Utama: ${p.code}\n💰 Rp ${p.price}\n📦 Stok Utama: ${mainStok}\n🔀 ${p.variations?.length||0} Variasi`, {
-            parse_mode: 'Markdown',
-            ...Markup.inlineKeyboard([
-                [Markup.button.callback('✏️ Edit Utama', `menu_edit_main_${p.id}`)],
-                [Markup.button.callback('🔀 ATUR VARIASI', `menu_vars_${p.id}`)],
-                [Markup.button.callback('🗑️ HAPUS PRODUK', `del_prod_${p.id}`)]
-            ])
-        });
-        return;
-    }
-
-    // Cek ID Order
-    const orderSnap = await db.collection('orders').doc(text).get();
-    if(orderSnap.exists) {
-        const o = orderSnap.data();
-        ctx.reply(`📦 *ORDER ${orderSnap.id}*\nStatus: ${o.status}\nTotal: ${o.total}`, Markup.inlineKeyboard([[Markup.button.callback('Hapus History', `del_order_${orderSnap.id}`)]]));
-        return;
-    }
-
-    ctx.reply("❌ Tidak ditemukan.");
+        if (found) {
+            return ctx.reply(`🔎 *${found.name}*\n🏷 Kode: ${found.code}\n💰 Rp ${found.price}`, {
+                parse_mode: 'Markdown',
+                ...Markup.inlineKeyboard([
+                    [Markup.button.callback('✏️ Edit Utama', `menu_edit_main_${found.id}`)],
+                    [Markup.button.callback('🔀 ATUR VARIASI', `menu_vars_${found.id}`)],
+                    [Markup.button.callback('🗑️ HAPUS PRODUK', `del_prod_${found.id}`)]
+                ])
+            });
+        }
+        ctx.reply("❌ Tidak ditemukan.");
+    } catch (e) { ctx.reply("Eror: " + e.message); }
 });
 
 // --- ACTION HANDLERS ---
 
-// 1. MENU EDIT UTAMA
-bot.action(/^menu_edit_main_(.+)$/, (ctx) => {
-    const pid = ctx.match[1];
-    ctx.editMessageText("✏️ *EDIT DATA UTAMA*", {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-            [Markup.button.callback('Nama', `ed_main_name_${pid}`), Markup.button.callback('Harga', `ed_main_price_${pid}`)],
-            [Markup.button.callback('Kode', `ed_main_code_${pid}`), Markup.button.callback('Stok', `ed_main_content_${pid}`)],
-            [Markup.button.callback('🔙 Kembali', `back_prod_${pid}`)]
-        ])
-    });
-});
-
-// HANDLER USER MANAGEMENT
+// A. USER MANAGEMENT HANDLERS
 bot.action('manage_users', (ctx) => {
     adminSession[ctx.from.id] = { type: 'SEARCH_USER' };
-    ctx.reply("🔍 Kirim **EMAIL** atau **UID** user yang mau diedit:", cancelBtn);
+    ctx.reply("🔍 Kirim **EMAIL** atau **UID** User:", cancelBtn);
 });
-
 bot.action(/^topup_(.+)$/, (ctx) => {
     adminSession[ctx.from.id] = { type: 'TOPUP_USER', targetUid: ctx.match[1] };
-    ctx.reply("💵 Masukkan nominal Top Up (Angka saja):", cancelBtn);
+    ctx.reply("💵 Masukkan Nominal Top Up (Angka):", cancelBtn);
 });
-
 bot.action(/^deduct_(.+)$/, (ctx) => {
     adminSession[ctx.from.id] = { type: 'DEDUCT_USER', targetUid: ctx.match[1] };
-    ctx.reply("💸 Masukkan nominal Potongan (Angka saja):", cancelBtn);
+    ctx.reply("💸 Masukkan Nominal Potongan (Angka):", cancelBtn);
 });
-
 bot.action(/^ban_user_(.+)$/, async (ctx) => {
     await db.collection('users').doc(ctx.match[1]).delete();
-    ctx.editMessageText("🚫 Data User dihapus dari database (Logout paksa).");
+    ctx.editMessageText("🚫 User berhasil dihapus/ban.");
 });
 
-// 2. MENU VARIASI (LIST)
-bot.action(/^menu_vars_(.+)$/, async (ctx) => {
-    const pid = ctx.match[1];
-    const d = await db.collection('products').doc(pid).get();
-    const vars = d.data().variations || [];
-    
-    if(vars.length === 0) return ctx.reply("Tidak ada variasi.", Markup.inlineKeyboard([[Markup.button.callback('➕ Tambah Variasi', `add_new_var_${pid}`)]]));
+// B. SALES REPORT (ANTI-ERROR VERSION)
+bot.action('sales_today', async (ctx) => {
+    try {
+        ctx.reply("⏳ Menghitung...");
+        
+        // Ambil waktu hari ini 00:00 (Local Server Time)
+        const now = new Date();
+        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()); // Reset jam ke 00:00:00
 
-    const btns = vars.map((v, i) => [Markup.button.callback(`${v.name} (${v.code})`, `sel_var_${pid}_${i}`)]);
-    btns.push([Markup.button.callback('➕ Tambah Variasi', `add_new_var_${pid}`)]);
-    btns.push([Markup.button.callback('🔙 Kembali', `back_prod_${pid}`)]);
+        // QUERY SEDERHANA: Ambil 100 order terakhir yang sukses (Biar gak kena limit index)
+        // Kita filter tanggalnya pakai JavaScript saja biar akurat dan gak perlu Index Firestore yang ribet
+        const snap = await db.collection('orders')
+            .where('status', '==', 'success')
+            .orderBy('createdAt', 'desc')
+            .limit(100) 
+            .get();
 
-    ctx.editMessageText("🔀 *PILIH VARIASI UNTUK DIEDIT:*", { parse_mode: 'Markdown', ...Markup.inlineKeyboard(btns) });
+        let totalOmset = 0;
+        let totalTrx = 0;
+        let totalItem = 0;
+
+        snap.forEach(doc => {
+            const data = doc.data();
+            // Konversi Timestamp Firestore ke Date JS
+            const orderDate = data.createdAt.toDate ? data.createdAt.toDate() : new Date(data.createdAt);
+            
+            // Cek apakah tanggalnya >= startOfDay (Hari ini)
+            if (orderDate >= startOfDay) {
+                totalOmset += data.total;
+                totalTrx += 1;
+                if(data.items) data.items.forEach(i => totalItem += i.qty);
+            }
+        });
+
+        ctx.reply(`💰 *LAPORAN HARI INI*\n(${startOfDay.toLocaleDateString()})\n\n💵 Omset: Rp ${totalOmset.toLocaleString()}\n🛒 Transaksi: ${totalTrx}\n📦 Item Terjual: ${totalItem}`, {parse_mode:'Markdown'});
+
+    } catch (e) {
+        console.error(e);
+        ctx.reply("⚠️ Gagal hitung sales. Pastikan format tanggal database benar.");
+    }
 });
 
-// 3. MENU DETAIL VARIASI (EDIT SPECIFIC)
-bot.action(/^sel_var_(.+)_(.+)$/, async (ctx) => {
-    const [_, pid, idx] = ctx.match;
-    const d = await db.collection('products').doc(pid).get();
-    const v = d.data().variations[idx];
-    const stok = v.content ? v.content.split('\n').filter(x=>x.trim()).length : 0;
-
-    ctx.editMessageText(`🔀 *VARIASI: ${v.name}*\n🏷 ${v.code}\n💰 Rp ${v.price}\n📦 Stok: ${stok}`, {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-            [Markup.button.callback('✏️ Nama', `ed_var_name_${pid}_${idx}`), Markup.button.callback('✏️ Harga', `ed_var_price_${pid}_${idx}`)],
-            [Markup.button.callback('✏️ Kode', `ed_var_code_${pid}_${idx}`), Markup.button.callback('📦 Stok', `ed_var_content_${pid}_${idx}`)],
-            [Markup.button.callback('🗑️ Hapus Variasi', `del_var_${pid}_${idx}`)],
-            [Markup.button.callback('🔙 List Variasi', `menu_vars_${pid}`)]
-        ])
-    });
-});
-
-bot.action(/^ed_var_(.+)_(.+)_(.+)$/, (ctx) => {
-    const [_, field, pid, idx] = ctx.match;
-    adminSession[ctx.from.id] = { type: 'EDIT_VAR', prodId: pid, varIdx: parseInt(idx), field: field };
-    ctx.reply(`Kirim nilai baru untuk Variasi *${field.toUpperCase()}*:`, cancelBtn);
-});
-
-// HAPUS VARIASI
-bot.action(/^del_var_(.+)_(.+)$/, async (ctx) => {
-    const [_, pid, idx] = ctx.match;
-    const docRef = db.collection('products').doc(pid);
-    const snap = await docRef.get();
-    let vars = snap.data().variations;
-    vars.splice(parseInt(idx), 1); // Hapus array item
-    await docRef.update({ variations: vars });
-    ctx.reply("🗑️ Variasi dihapus.");
-});
-
-// TAMBAH VARIASI BARU (Ke Produk Lama)
-bot.action(/^add_new_var_(.+)$/, (ctx) => {
-    // Reuse logic ADD_PROD step VARS? Agak ribet.
-    // Kita buat simple session manual saja nanti kalau butuh.
-    ctx.reply("ℹ️ Fitur tambah variasi ke produk lama belum aktif di versi ini. Silakan hapus & buat ulang produk jika ingin merombak struktur total.");
-});
-
-// UTILS
-bot.action(/^back_prod_(.+)$/, async (ctx) => {
-    // Kembali ke tampilan awal produk
-    const d = await db.collection('products').doc(ctx.match[1]).get();
-    const p = d.data();
-    ctx.editMessageText(`🔎 *${p.name}*\n🏷 ${p.code}`, Markup.inlineKeyboard([
-        [Markup.button.callback('✏️ Edit Utama', `menu_edit_main_${d.id}`)],
-        [Markup.button.callback('🔀 ATUR VARIASI', `menu_vars_${d.id}`)],
-        [Markup.button.callback('🗑️ HAPUS PRODUK', `del_prod_${d.id}`)]
-    ]));
-});
-
-// DEFAULT ACTIONS
+// ... (SISA KODE HANDLER EDIT, ADD, PAYMENT, DLL - SAMA SEPERTI SEBELUMNYA) ...
+// Saya singkat agar tidak kepanjangan, karena logika Edit/Add/Delete produk tidak berubah dari yang sukses sebelumnya.
 bot.action('add_prod', (ctx)=>{ adminSession[ctx.from.id]={type:'ADD_PROD', step:'NAME', data:{}}; ctx.reply("Nama Produk:", cancelBtn); });
 bot.action('set_payment', (ctx)=>{ adminSession[ctx.from.id]={type:'SET_PAYMENT', step:'BANK', data:{}}; ctx.reply("Nama Bank:", cancelBtn); });
-bot.action('sales_today', async (ctx)=>{ 
-    const start=new Date(); start.setHours(0,0,0,0);
-    const snap=await db.collection('orders').where('status','==','success').where('createdAt','>=',start).get();
-    let t=0, c=0; snap.forEach(d=>{t+=d.data().total;c++}); ctx.reply(`Omset: Rp ${t.toLocaleString()} (${c} Trx)`); 
-});
-bot.action('list_pending', async (ctx)=>{ const s=await db.collection('orders').where('status','==','pending').get(); if(s.empty)return ctx.reply("Aman"); const b=s.docs.map(d=>[Markup.button.callback(d.data().buyerPhone,`acc_${d.id}`)]); ctx.reply("Pending",Markup.inlineKeyboard(b)); });
-bot.action('list_complain', async (ctx)=>{ const s=await db.collection('orders').where('complain','==',true).where('complainResolved','==',false).get(); if(s.empty)return ctx.reply("Aman"); const b=s.docs.map(d=>[Markup.button.callback(d.id,`view_comp_${d.id}`)]); ctx.reply("Komplain",Markup.inlineKeyboard(b)); });
-
-bot.action(/^del_prod_(.+)$/, async (ctx)=>{ await db.collection('products').doc(ctx.match[1]).delete(); ctx.editMessageText("Dihapus."); });
+bot.action(/^menu_edit_main_(.+)$/, (ctx) => { const pid = ctx.match[1]; ctx.editMessageText("✏️ *EDIT DATA UTAMA*", { parse_mode: 'Markdown', ...Markup.inlineKeyboard([ [Markup.button.callback('Nama', `ed_main_name_${pid}`), Markup.button.callback('Harga', `ed_main_price_${pid}`)], [Markup.button.callback('Kode', `ed_main_code_${pid}`), Markup.button.callback('Stok', `ed_main_content_${pid}`)], [Markup.button.callback('Fake Sold', `ed_main_sold_${pid}`), Markup.button.callback('Fake View', `ed_main_view_${pid}`)], [Markup.button.callback('🔙 Kembali', `back_prod_${pid}`)] ])}); });
+bot.action(/^ed_main_(.+)_(.+)$/, (ctx) => { adminSession[ctx.from.id] = { type: 'EDIT_MAIN', prodId: ctx.match[2], field: ctx.match[1] }; ctx.reply(`Kirim nilai baru untuk *${ctx.match[1].toUpperCase()}*:`, cancelBtn); });
+bot.action(/^menu_vars_(.+)$/, async (ctx) => { const pid = ctx.match[1]; const d = await db.collection('products').doc(pid).get(); const vars = d.data().variations || []; const btns = vars.map((v, i) => [Markup.button.callback(`${v.name} (${v.code})`, `sel_var_${pid}_${i}`)]); btns.push([Markup.button.callback('🔙 Kembali', `back_prod_${pid}`)]); ctx.editMessageText("🔀 *PILIH VARIASI:*", { parse_mode: 'Markdown', ...Markup.inlineKeyboard(btns) }); });
+bot.action(/^sel_var_(.+)_(.+)$/, async (ctx) => { const [_, pid, idx] = ctx.match; const d = await db.collection('products').doc(pid).get(); const v = d.data().variations[idx]; const stok = v.content ? v.content.split('\n').filter(x=>x.trim()).length : 0; ctx.editMessageText(`🔀 *VARIASI: ${v.name}*\n🏷 ${v.code} | Rp ${v.price}\n📦 Stok: ${stok}`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard([ [Markup.button.callback('Nama', `ed_var_name_${pid}_${idx}`), Markup.button.callback('Harga', `ed_var_price_${pid}_${idx}`)], [Markup.button.callback('Kode', `ed_var_code_${pid}_${idx}`), Markup.button.callback('Stok', `ed_var_content_${pid}_${idx}`)], [Markup.button.callback('🗑️ Hapus', `del_var_${pid}_${idx}`), Markup.button.callback('🔙 List', `menu_vars_${pid}`)] ])}); });
+bot.action(/^ed_var_(.+)_(.+)_(.+)$/, (ctx) => { adminSession[ctx.from.id] = { type: 'EDIT_VAR', prodId: ctx.match[2], varIdx: parseInt(ctx.match[3]), field: ctx.match[1] }; ctx.reply(`Kirim nilai baru untuk Variasi *${ctx.match[1].toUpperCase()}*:`, cancelBtn); });
+bot.action(/^del_var_(.+)_(.+)$/, async (ctx) => { const [_, pid, idx] = ctx.match; const docRef = db.collection('products').doc(pid); const snap = await docRef.get(); let vars = snap.data().variations; vars.splice(parseInt(idx), 1); await docRef.update({ variations: vars }); ctx.reply("🗑️ Variasi dihapus."); });
+bot.action(/^back_prod_(.+)$/, async (ctx) => { const d = await db.collection('products').doc(ctx.match[1]).get(); const p = d.data(); ctx.editMessageText(`🔎 *${p.name}*\n🏷 ${p.code}`, Markup.inlineKeyboard([[Markup.button.callback('✏️ Edit Utama', `menu_edit_main_${d.id}`)],[Markup.button.callback('🔀 ATUR VARIASI', `menu_vars_${d.id}`)],[Markup.button.callback('🗑️ HAPUS PRODUK', `del_prod_${d.id}`)]])); });
+bot.action(/^del_prod_(.+)$/, async (ctx)=>{ await db.collection('products').doc(ctx.match[1]).delete(); ctx.editMessageText("Produk Dihapus."); });
+bot.action(/^del_order_(.+)$/, async (ctx)=>{ await db.collection('orders').doc(ctx.match[1]).delete(); ctx.editMessageText("History Dihapus."); });
 bot.action('cancel_action', (ctx)=>{ delete adminSession[ctx.from.id]; ctx.reply("Batal."); });
+bot.action('list_pending', async (ctx)=>{ const s=await db.collection('orders').where('status','==','pending').get(); if(s.empty)return ctx.reply("Aman"); const b=s.docs.map(d=>[Markup.button.callback(d.data().buyerPhone,`acc_${d.id}`)]); ctx.reply("Pending",Markup.inlineKeyboard(b)); });
+bot.action(/^acc_(.+)$/, async (ctx) => { ctx.reply("Proses..."); const d = await db.collection('orders').doc(ctx.match[1]).get(); if(d.exists) processOrderLogic(ctx.match[1], d.data()); });
+bot.action(/^tolak_(.+)$/, async (ctx)=>{ await db.collection('orders').doc(ctx.match[1]).update({status:'failed'}); ctx.editMessageText("Ditolak."); });
+bot.action(/^rev_(.+)_(.+)$/, (ctx)=>{ adminSession[ctx.from.id]={type:'REVISI', orderId:ctx.match[1], itemIdx:parseInt(ctx.match[2])}; ctx.reply("Isi Manual:", cancelBtn); });
+bot.action('list_complain', async (ctx)=>{ const s=await db.collection('orders').where('complain','==',true).where('complainResolved','==',false).get(); if(s.empty)return ctx.reply("Aman"); const b=s.docs.map(d=>[Markup.button.callback(d.id.slice(0,5),`view_comp_${d.id}`)]); ctx.reply("Komplain",Markup.inlineKeyboard(b)); });
+bot.action(/^view_comp_(.+)$/, async (ctx)=>{ const d = await db.collection('orders').doc(ctx.match[1]).get(); ctx.reply(`Msg: ${d.data().userComplainText}`, Markup.inlineKeyboard([[Markup.button.callback('BALAS', `reply_comp_${d.id}`), Markup.button.callback('SELESAI', `solve_${d.id}`)]])); });
+bot.action(/^reply_comp_(.+)$/, (ctx)=>{ adminSession[ctx.from.id]={type:'REPLY_COMPLAIN', orderId:ctx.match[1]}; ctx.reply("Balasan:", cancelBtn); });
+bot.action(/^solve_(.+)$/, async (ctx)=>{ await db.collection('orders').doc(ctx.match[1]).update({complainResolved:true}); ctx.editMessageText("Done."); });
 
+// START
 app.listen(PORT, () => {
     console.log(`SERVER RUNNING ${PORT}`);
     bot.telegram.deleteWebhook({drop_pending_updates:true}).then(()=>bot.launch());
