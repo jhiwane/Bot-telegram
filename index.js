@@ -126,7 +126,7 @@ app.get('/', (req, res) => res.send('SERVER JSN-02 READY'));
 
 const mainMenu = Markup.inlineKeyboard([
     [Markup.button.callback('➕ TAMBAH PRODUK', 'add_prod')],
-    [Markup.button.callback('💳 ATUR PEMBAYARAN', 'set_payment')],
+    [Markup.button.callback('👥 KELOLA USER', 'manage_users'), Markup.button.callback('💳 ATUR PEMBAYARAN', 'set_payment')],
     [Markup.button.callback('💰 SALES REPORT', 'sales_today'), Markup.button.callback('🚨 KOMPLAIN', 'list_complain')]
 ]);
 
@@ -220,6 +220,50 @@ bot.on('text', async (ctx, next) => {
         return;
     }
 
+        // 5. MANAJEMEN USER (TOP UP / EDIT)
+        else if (session.type === 'SEARCH_USER') {
+            // Cari user by Email (Exact match) atau UID
+            let snap = await db.collection('users').where('email', '==', text).get();
+            if (snap.empty) {
+                // Coba cari by UID
+                const docRef = await db.collection('users').doc(text).get();
+                if (docRef.exists) snap = { docs: [docRef], empty: false };
+            }
+
+            if (!snap.empty) {
+                const u = snap.docs[0].data();
+                const uid = snap.docs[0].id;
+                ctx.reply(`👤 *USER DITEMUKAN*\n🆔 ID: \`${uid}\`\n📧 Email: ${u.email || 'Tamu/Anon'}\n💰 Saldo: Rp ${u.balance?.toLocaleString() || 0}\n🎭 Role: ${u.role || 'Member'}`, 
+                    Markup.inlineKeyboard([
+                        [Markup.button.callback('💵 Top Up Saldo', `topup_${uid}`), Markup.button.callback('💸 Potong Saldo', `deduct_${uid}`)],
+                        [Markup.button.callback('🚫 BAN / HAPUS', `ban_user_${uid}`)]
+                    ])
+                );
+                delete adminSession[userId];
+            } else {
+                ctx.reply("❌ User tidak ditemukan. Pastikan Email/UID benar.");
+            }
+        }
+        else if (session.type === 'TOPUP_USER') {
+            const amount = parseInt(text);
+            if (isNaN(amount)) return ctx.reply("Harus angka!");
+            
+            await db.collection('users').doc(session.targetUid).update({
+                balance: admin.firestore.FieldValue.increment(amount)
+            });
+            delete adminSession[userId];
+            ctx.reply(`✅ Berhasil Top Up Rp ${amount.toLocaleString()} ke user tersebut.`);
+        }
+        else if (session.type === 'DEDUCT_USER') {
+            const amount = parseInt(text);
+            if (isNaN(amount)) return ctx.reply("Harus angka!");
+            
+            await db.collection('users').doc(session.targetUid).update({
+                balance: admin.firestore.FieldValue.increment(-amount)
+            });
+            delete adminSession[userId];
+            ctx.reply(`✅ Saldo dipotong Rp ${amount.toLocaleString()}.`);
+        }
     // B. SMART SEARCH (DEEP SEARCH VARIATION)
     // 1. Cek Kode Utama
     let snap = await db.collection('products').where('code', '==', text).get();
@@ -279,10 +323,25 @@ bot.action(/^menu_edit_main_(.+)$/, (ctx) => {
     });
 });
 
-bot.action(/^ed_main_(.+)_(.+)$/, (ctx) => {
-    const [_, field, pid] = ctx.match;
-    adminSession[ctx.from.id] = { type: 'EDIT_MAIN', prodId: pid, field: field };
-    ctx.reply(`Kirim nilai baru untuk *${field.toUpperCase()}*:`, cancelBtn);
+// HANDLER USER MANAGEMENT
+bot.action('manage_users', (ctx) => {
+    adminSession[ctx.from.id] = { type: 'SEARCH_USER' };
+    ctx.reply("🔍 Kirim **EMAIL** atau **UID** user yang mau diedit:", cancelBtn);
+});
+
+bot.action(/^topup_(.+)$/, (ctx) => {
+    adminSession[ctx.from.id] = { type: 'TOPUP_USER', targetUid: ctx.match[1] };
+    ctx.reply("💵 Masukkan nominal Top Up (Angka saja):", cancelBtn);
+});
+
+bot.action(/^deduct_(.+)$/, (ctx) => {
+    adminSession[ctx.from.id] = { type: 'DEDUCT_USER', targetUid: ctx.match[1] };
+    ctx.reply("💸 Masukkan nominal Potongan (Angka saja):", cancelBtn);
+});
+
+bot.action(/^ban_user_(.+)$/, async (ctx) => {
+    await db.collection('users').doc(ctx.match[1]).delete();
+    ctx.editMessageText("🚫 Data User dihapus dari database (Logout paksa).");
 });
 
 // 2. MENU VARIASI (LIST)
