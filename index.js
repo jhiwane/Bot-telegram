@@ -2,6 +2,8 @@ const express = require('express');
 const { Telegraf, Markup } = require('telegraf');
 const admin = require('firebase-admin');
 const cors = require('cors'); 
+// Pastikan Node.js v18+ agar fetch bawaan jalan, atau install node-fetch
+// const fetch = require('node-fetch'); 
 require('dotenv').config();
 
 // ==========================================
@@ -13,7 +15,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_ID = process.env.ADMIN_ID;
-const adminSession = {}; // Ingatan Bot untuk sesi input
+const adminSession = {}; // Memory Bot
 
 // --- FIREBASE SETUP ---
 let serviceAccount;
@@ -80,7 +82,7 @@ const processStock = async (productId, variantName, qtyNeeded) => {
     });
 };
 
-// FUNGSI: Proses Order (Otomatis / Manual / Saldo)
+// FUNGSI: Proses Order (Otomatis / Manual / Saldo) dengan Partial Support
 const processOrderLogic = async (orderId, orderData) => {
     let items = [], 
         allComplete = true,
@@ -90,64 +92,91 @@ const processOrderLogic = async (orderId, orderData) => {
     for (let i = 0; i < orderData.items.length; i++) {
         const item = orderData.items[i];
         
-        // Skip jika konten sudah terisi (misal hasil revisi manual)
-        if (item.content) { 
+        // Cek apakah Item ini SUDAH LENGKAP (Tidak ada tag MENUNGGU)
+        const isContentFull = item.content && !item.content.includes('[...MENUNGGU');
+        
+        if (isContentFull) { 
             items.push(item); 
-            msgLog += `✅ ${item.name}: SUKSES (Manual)\n`; 
+            msgLog += `✅ ${item.name}: SUKSES (Lengkap)\n`; 
             continue; 
         }
 
+        // Hitung kebutuhan sisa
+        let currentContentLines = item.content ? item.content.split('\n') : [];
+        let validLinesCount = currentContentLines.filter(l => !l.includes('[...MENUNGGU')).length;
+        let qtyButuh = item.qty - validLinesCount;
+
+        if (qtyButuh <= 0) {
+            items.push(item); continue; 
+        }
+
         try {
-            // Proses pemotongan stok
-            const result = await processStock(item.id, item.variantName, item.qty);
+            const result = await processStock(item.id, item.variantName, qtyButuh);
             
             if (result && result.success) {
-                // SUKSES PENUH
-                items.push({ ...item, content: result.data });
-                msgLog += `✅ ${item.name}: SUKSES\n`;
+                // STOK CUKUP -> GABUNGKAN
+                const validLines = currentContentLines.filter(l => !l.includes('[...MENUNGGU'));
+                const newLines = result.data.split('\n');
+                const finalContent = [...validLines, ...newLines].join('\n');
+                
+                items.push({ ...item, content: finalContent });
+                msgLog += `✅ ${item.name}: TERISI PENUH (+${qtyButuh})\n`;
             } 
             else if (result && !result.success && result.currentStock > 0) {
-                // PARTIAL (Stok Ada Dikit)
+                // PARTIAL (Ada stok tapi kurang)
                 const partialRes = await processStock(item.id, item.variantName, result.currentStock);
-                const sisa = item.qty - result.currentStock;
-                const txt = partialRes.data + `\n\n[...MENUNGGU ${sisa} LAGI...]`;
+                const validLines = currentContentLines.filter(l => !l.includes('[...MENUNGGU'));
+                const newLines = partialRes.data.split('\n');
                 
-                items.push({ ...item, content: txt });
+                // Hitung sisa total yang masih kurang
+                const totalAda = validLines.length + newLines.length;
+                const totalKurang = item.qty - totalAda;
+                
+                let finalLines = [...validLines, ...newLines];
+                for(let k=0; k<totalKurang; k++) finalLines.push(`[...MENUNGGU ${totalKurang} LAGI...]`);
+                
+                items.push({ ...item, content: finalLines.join('\n') });
                 allComplete = false;
-                msgLog += `⚠️ ${item.name}: PARTIAL (Dapat ${result.currentStock}, Kurang ${sisa})\n`;
+                msgLog += `⚠️ ${item.name}: PARTIAL (+${result.currentStock}, Kurang ${totalKurang})\n`;
                 revBtns.push([Markup.button.callback(`🔧 ISI SISA: ${item.name}`, `rev_${orderId}_${i}`)]);
             }
             else {
-                // GAGAL TOTAL (Stok Kosong)
-                items.push({ ...item, content: null });
+                // STOK KOSONG TOTAL
+                let finalLines = currentContentLines.filter(l => !l.includes('[...MENUNGGU'));
+                const totalKurang = item.qty - finalLines.length;
+                
+                // Refresh placeholder
+                if (finalLines.length === 0 || totalKurang > 0) {
+                    for(let k=0; k<totalKurang; k++) finalLines.push(`[...MENUNGGU ${totalKurang} LAGI...]`);
+                }
+
+                items.push({ ...item, content: finalLines.join('\n') });
                 allComplete = false;
-                msgLog += `❌ ${item.name}: STOK KOSONG\n`;
-                revBtns.push([Markup.button.callback(`🔧 ISI: ${item.name}`, `rev_${orderId}_${i}`)]);
+                msgLog += `❌ ${item.name}: STOK KOSONG (Kurang ${totalKurang})\n`;
+                revBtns.push([Markup.button.callback(`🔧 ISI SISA: ${item.name}`, `rev_${orderId}_${i}`)]);
             }
         } catch (e) {
             console.error(e);
-            items.push({ ...item, content: null });
+            items.push(item);
             allComplete = false;
             msgLog += `❌ ${item.name}: ERROR DB\n`;
         }
     }
 
-    // Update Order di Firebase
+    // Update Status Order
     await db.collection('orders').doc(orderId).update({ items, status: 'success', processed: true });
 
-    // Lapor Admin
     if (!allComplete) {
         bot.telegram.sendMessage(ADMIN_ID, 
-            `⚠️ *ORDER ${orderId} BUTUH REVISI*\n${msgLog}`, 
+            `⚠️ *ORDER ${orderId} MASIH KURANG (PARTIAL)*\n${msgLog}`, 
             { parse_mode: 'Markdown', ...Markup.inlineKeyboard(revBtns) }
         );
     } else {
-        // Jika sukses, tetap kasih tombol edit (buat jaga-jaga ada akun error)
         bot.telegram.sendMessage(ADMIN_ID, 
             `✅ *ORDER ${orderId} SELESAI*\n${msgLog}`, 
             { 
-                parse_mode: 'Markdown',
-                ...Markup.inlineKeyboard([[Markup.button.callback('🛠 MENU EDIT ORDER INI', `menu_edit_ord_${orderId}`)]])
+                parse_mode: 'Markdown', 
+                ...Markup.inlineKeyboard([[Markup.button.callback('🛠 MENU EDIT ORDER', `menu_edit_ord_${orderId}`)]]) 
             }
         );
     }
@@ -216,7 +245,6 @@ app.post('/api/notify-order', async (req, res) => {
     res.json({ status: 'ok' });
 });
 
-// Endpoint Cek Server
 app.get('/', (req, res) => res.send('SERVER JSN-02 READY'));
 
 // ==========================================
@@ -232,42 +260,75 @@ const mainMenu = Markup.inlineKeyboard([
 
 bot.command('admin', (ctx) => ctx.reply("🛠 *PANEL ADMIN JSN-02*\nKetik Kode Produk / ID Order / Email User.", mainMenu));
 
-// --- LISTENER TEKS (SEARCH & WIZARD) ---
-// Note: Menggunakan bot.on(['text', 'photo']) untuk menangani input gambar
-bot.on(['text', 'photo'], async (ctx, next) => {
+// --- LISTENER TEKS & FILE (SEARCH & WIZARD) ---
+bot.on(['text', 'photo', 'document'], async (ctx, next) => {
     if (String(ctx.from.id) !== ADMIN_ID) return next();
     
-    // Handle text input or caption if photo
-    const text = ctx.message.text ? ctx.message.text.trim() : (ctx.message.caption ? ctx.message.caption.trim() : '');
+    let text = "";
+    // Handle Text vs File
+    if (ctx.message.document) {
+        try {
+            const fileLink = await ctx.telegram.getFileLink(ctx.message.document.file_id);
+            const response = await fetch(fileLink);
+            text = await response.text(); 
+            ctx.reply("📂 File diterima! Memproses konten...");
+        } catch(e) { return ctx.reply("Gagal baca file."); }
+    } else if (ctx.message.photo) {
+        text = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+    } else {
+        text = ctx.message.text ? ctx.message.text.trim() : '';
+    }
+
     const textLower = text.toLowerCase();
     const userId = ctx.from.id;
     const session = adminSession[userId];
 
-    // Helper untuk mengambil URL/File ID gambar
-    const getPhoto = () => {
-        if (ctx.message.photo) {
-            // Ambil file_id resolusi terbesar
-            return ctx.message.photo[ctx.message.photo.length - 1].file_id;
-        }
-        return text; // Jika user kirim URL text
-    };
-
     // A. JIKA SEDANG DALAM SESI INPUT (WIZARD)
     if (session) {
         
-        // 1. REVISI & EDIT BARIS
+        // 1. REVISI & SMART FILL (LOGIKA CERDAS)
         if (session.type === 'REVISI') {
-            if (!isNaN(text) && parseInt(text) > 0) {
+            // a. Jika kirim ANGKA -> Edit Baris Spesifik
+            if (!isNaN(text) && parseInt(text) > 0 && text.length < 5) {
                 session.targetLine = parseInt(text) - 1; 
                 session.type = 'REVISI_LINE_INPUT'; 
                 ctx.reply(`🔧 Oke, kirim data baru untuk **BARIS #${text}**:`, cancelBtn);
-            } else {
+            } 
+            // b. Jika kirim TEKS/FILE -> SMART FILL
+            else {
                 const d = await db.collection('orders').doc(session.orderId).get();
                 const data = d.data();
-                data.items[session.itemIdx].content = text;
+                const currentItem = data.items[session.itemIdx];
+                
+                let existingLines = currentItem.content ? currentItem.content.split('\n') : [];
+                let inputLines = text.split('\n').filter(x => x.trim().length > 0);
+                
+                let filledCount = 0;
+                let newContentArr = [...existingLines];
+                
+                // Loop cari slot kosong
+                for (let i = 0; i < newContentArr.length; i++) {
+                    if (newContentArr[i].includes('[...MENUNGGU') && inputLines.length > 0) {
+                        newContentArr[i] = inputLines.shift(); 
+                        filledCount++;
+                    }
+                }
+                
+                // Cek jika mode Replace All (karena tidak ada slot kosong)
+                const isAllValidInitially = !currentItem.content.includes('[...MENUNGGU');
+                
+                if (isAllValidInitially) {
+                    currentItem.content = text;
+                    ctx.reply("✅ Data DITIMPA SEMUA (Replace All).");
+                } else {
+                    currentItem.content = newContentArr.join('\n');
+                    ctx.reply(`✅ Berhasil mengisi ${filledCount} slot kosong.`);
+                }
+
                 await db.collection('orders').doc(session.orderId).update({ items: data.items });
                 delete adminSession[userId];
-                ctx.reply("✅ Data item berhasil ditimpa semua.");
+                
+                // Cek ulang status order
                 processOrderLogic(session.orderId, data);
             }
         }
@@ -278,11 +339,11 @@ bot.on(['text', 'photo'], async (ctx, next) => {
             let lines = currentItem.content ? currentItem.content.split('\n') : [];
             
             if (lines[session.targetLine] !== undefined) {
-                lines[session.targetLine] = text; 
-                currentItem.content = lines.join('\n'); 
+                lines[session.targetLine] = text;
+                currentItem.content = lines.join('\n');
                 await db.collection('orders').doc(session.orderId).update({ items: data.items });
                 delete adminSession[userId];
-                ctx.reply(`✅ Baris #${session.targetLine + 1} berhasil diupdate!`);
+                ctx.reply(`✅ Baris #${session.targetLine + 1} diupdate!`);
             } else {
                 delete adminSession[userId];
                 ctx.reply("❌ Nomor baris tidak valid.");
@@ -294,12 +355,8 @@ bot.on(['text', 'photo'], async (ctx, next) => {
             const d = session.data;
             if (session.step === 'NAME') { d.name = text; session.step = 'CODE'; ctx.reply("🏷 Kode Produk Utama:", cancelBtn); }
             else if (session.step === 'CODE') { d.code = text; session.step = 'PRICE'; ctx.reply("💰 Harga Utama (Angka):", cancelBtn); }
-            else if (session.step === 'PRICE') { d.price = parseInt(text); session.step = 'IMG'; ctx.reply("🖼 Kirim **GAMBAR** atau URL Gambar:", cancelBtn); }
-            else if (session.step === 'IMG') { 
-                d.image = getPhoto(); 
-                session.step = 'STATS'; 
-                ctx.reply("📊 Fake Sold & View (cth: 100 5000):", cancelBtn); 
-            }
+            else if (session.step === 'PRICE') { d.price = parseInt(text); session.step = 'IMG'; ctx.reply("🖼 Kirim **GAMBAR** atau URL:", cancelBtn); }
+            else if (session.step === 'IMG') { d.image = text; session.step = 'STATS'; ctx.reply("📊 Fake Sold & View (cth: 100 5000):", cancelBtn); }
             else if (session.step === 'STATS') { const [s, v] = text.split(' '); d.sold = parseInt(s)||0; d.view = parseInt(v)||0; session.step = 'DESC'; ctx.reply("📝 Deskripsi:", cancelBtn); }
             else if (session.step === 'DESC') { d.desc = text; session.step = 'CONTENT'; ctx.reply("📦 Stok Utama (Skip jika variasi):", cancelBtn); }
             else if (session.step === 'CONTENT') { d.content = text==='skip'?'':text; session.step = 'VARS'; ctx.reply("🔀 Ada Variasi? (ya/tidak):", cancelBtn); }
@@ -315,7 +372,7 @@ bot.on(['text', 'photo'], async (ctx, next) => {
             }
         }
 
-        // 3. SEARCH USER
+        // 3. USER MANAGEMENT (FIXED SEARCH)
         else if (session.type === 'SEARCH_USER') {
             try {
                 let foundDocs = [];
@@ -341,7 +398,7 @@ bot.on(['text', 'photo'], async (ctx, next) => {
             else if(session.step === 'NO') { session.data.no=text; session.step='AN'; ctx.reply("Atas Nama:", cancelBtn); }
             else if(session.step === 'AN') { session.data.an=text; session.step='QR'; ctx.reply("Kirim **GAMBAR QRIS** atau URL (skip/url):", cancelBtn); }
             else if(session.step === 'QR') { 
-                const qris = getPhoto() === 'skip' ? '' : getPhoto();
+                const qris = text === 'skip' ? '' : text;
                 await db.collection('settings').doc('payment').set({info:`🏦 ${session.data.bank}\n🔢 ${session.data.no}\n👤 ${session.data.an}`, qris: qris}); 
                 delete adminSession[userId]; ctx.reply("✅ Saved."); 
             }
@@ -352,13 +409,12 @@ bot.on(['text', 'photo'], async (ctx, next) => {
         
         // 5. SETTING BACKGROUND
         else if (session.type === 'SET_BG') {
-            await db.collection('settings').doc('layout').set({ backgroundUrl: getPhoto() }, { merge: true });
+            await db.collection('settings').doc('layout').set({ backgroundUrl: text }, { merge: true });
             delete adminSession[userId];
             ctx.reply("✅ Background Website Berhasil Diganti!");
         }
 
-        // --- PENTING: RETURN DI SINI AGAR TIDAK LANJUT KE PENCARIAN ---
-        return;
+        return; // STOP agar tidak lanjut ke Search
     }
 
     // B. LOGIKA PENCARIAN (Smart Search) - Hanya jika ada teks
@@ -403,7 +459,6 @@ bot.action('set_bg', (ctx) => {
     adminSession[ctx.from.id] = { type: 'SET_BG' };
     ctx.reply("🖼 Kirim **URL GAMBAR / GIF** untuk background website:", cancelBtn);
 });
-// User Management
 bot.action('manage_users', (ctx) => { adminSession[ctx.from.id] = { type: 'SEARCH_USER' }; ctx.reply("🔍 Kirim **EMAIL** atau **UID** User:", cancelBtn); });
 bot.action(/^topup_(.+)$/, (ctx) => { adminSession[ctx.from.id] = { type: 'TOPUP_USER', targetUid: ctx.match[1] }; ctx.reply("💵 Nominal Top Up (Angka):", cancelBtn); });
 bot.action(/^deduct_(.+)$/, (ctx) => { adminSession[ctx.from.id] = { type: 'DEDUCT_USER', targetUid: ctx.match[1] }; ctx.reply("💸 Nominal Potong (Angka):", cancelBtn); });
@@ -415,7 +470,7 @@ bot.action('sales_today', async (ctx) => {
         ctx.reply("⏳ Menghitung...");
         const now = new Date();
         const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()); 
-        const snap = await db.collection('orders').orderBy('createdAt', 'desc').limit(200).get(); // Limit 200 biar aman
+        const snap = await db.collection('orders').orderBy('createdAt', 'desc').limit(200).get(); // Limit 200
         
         let totalOmset = 0, totalTrx = 0, totalItem = 0;
         snap.forEach(doc => {
@@ -474,11 +529,24 @@ bot.action(/^menu_edit_ord_(.+)$/, async (ctx) => {
 bot.action(/^rev_(.+)_(.+)$/, async (ctx)=>{ 
     const orderId = ctx.match[1]; const itemIdx = parseInt(ctx.match[2]);
     const d = await db.collection('orders').doc(orderId).get(); const item = d.data().items[itemIdx];
-    let msg = `🔧 *EDIT ITEM: ${item.name}*\n\nData saat ini:\n`;
-    const lines = item.content ? item.content.split('\n') : [];
-    lines.forEach((l, i) => msg += `*${i+1}.* ${l.substring(0, 30)}...\n`);
-    msg += `\n👉 *OPSI:* Kirim ANGKA (1, 2) untuk ganti baris, atau TEKS untuk timpa semua.`;
-    adminSession[ctx.from.id]={type:'REVISI', orderId, itemIdx}; ctx.reply(msg, {parse_mode:'Markdown', ...cancelBtn}); 
+    
+    // LOGIKA ANTI CRASH LIMIT TELEGRAM
+    const content = item.content || "";
+    let msg = `🔧 *EDIT: ${item.name}*\n\n`;
+    
+    if (content.length > 3000) {
+        const buffer = Buffer.from(content, 'utf-8');
+        await ctx.replyWithDocument({ source: buffer, filename: `data_${item.name}.txt` }, { caption: "📂 Data terlalu panjang. Lihat file di atas." });
+        msg += "👉 Data dikirim via file karena > 3000 karakter.\n";
+    } else {
+        const lines = content.split('\n');
+        lines.forEach((l, i) => msg += `*${i+1}.* ${l.substring(0, 30)}...\n`);
+    }
+    
+    msg += `\n👉 *CARA EDIT:*\n1. Kirim *ANGKA* (misal: 1) untuk edit baris itu.\n2. Kirim *TEKS* (atau FILE .txt) untuk **Smart Fill** (isi slot kosong).`;
+    
+    adminSession[ctx.from.id]={type:'REVISI', orderId, itemIdx}; 
+    ctx.reply(msg, {parse_mode:'Markdown', ...cancelBtn}); 
 });
 
 // Lainnya
