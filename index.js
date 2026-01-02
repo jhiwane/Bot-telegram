@@ -225,15 +225,15 @@ app.get('/', (req, res) => res.send('SERVER JSN-02 READY'));
 
 const mainMenu = Markup.inlineKeyboard([
     [Markup.button.callback('➕ TAMBAH PRODUK', 'add_prod')],
-    [Markup.button.callback('👥 KELOLA USER', 'manage_users'), Markup.button.callback('💳 ATUR PEMBAYARAN', 'set_payment')],
-    [Markup.button.callback('🎨 GANTI BACKGROUND', 'set_bg')], // <-- BARU
-    [Markup.button.callback('💰 LAPORAN HARI INI', 'sales_today'), Markup.button.callback('🚨 KOMPLAIN', 'list_complain')]
+    [Markup.button.callback('👥 USER', 'manage_users'), Markup.button.callback('💳 PAYMENT', 'set_payment')],
+    [Markup.button.callback('🎨 GANTI BACKGROUND', 'set_bg')],
+    [Markup.button.callback('💰 SALES', 'sales_today'), Markup.button.callback('🚨 KOMPLAIN', 'list_complain')]
 ]);
 
 bot.command('admin', (ctx) => ctx.reply("🛠 *PANEL ADMIN JSN-02*\nKetik Kode Produk / ID Order / Email User.", mainMenu));
 
 // --- LISTENER TEKS (SEARCH & WIZARD) ---
-// Note: Menggunakan bot.on(['text', 'photo']) untuk menangani input gambar juga
+// Note: Menggunakan bot.on(['text', 'photo']) untuk menangani input gambar
 bot.on(['text', 'photo'], async (ctx, next) => {
     if (String(ctx.from.id) !== ADMIN_ID) return next();
     
@@ -255,15 +255,13 @@ bot.on(['text', 'photo'], async (ctx, next) => {
     // A. JIKA SEDANG DALAM SESI INPUT (WIZARD)
     if (session) {
         
-        // 1. REVISI & EDIT BARIS (FEATURE BARU)
+        // 1. REVISI & EDIT BARIS
         if (session.type === 'REVISI') {
-            // Cek apakah admin mengetik ANGKA (untuk edit baris spesifik)
             if (!isNaN(text) && parseInt(text) > 0) {
-                session.targetLine = parseInt(text) - 1; // Array index mulai dari 0
-                session.type = 'REVISI_LINE_INPUT'; // Pindah state
+                session.targetLine = parseInt(text) - 1; 
+                session.type = 'REVISI_LINE_INPUT'; 
                 ctx.reply(`🔧 Oke, kirim data baru untuk **BARIS #${text}**:`, cancelBtn);
             } else {
-                // Jika teks biasa, berarti REPLACE ALL (Timpa Semua)
                 const d = await db.collection('orders').doc(session.orderId).get();
                 const data = d.data();
                 data.items[session.itemIdx].content = text;
@@ -277,13 +275,11 @@ bot.on(['text', 'photo'], async (ctx, next) => {
             const d = await db.collection('orders').doc(session.orderId).get();
             const data = d.data();
             const currentItem = data.items[session.itemIdx];
-            
             let lines = currentItem.content ? currentItem.content.split('\n') : [];
             
             if (lines[session.targetLine] !== undefined) {
-                lines[session.targetLine] = text; // Update baris itu saja
-                currentItem.content = lines.join('\n'); // Gabung lagi
-                
+                lines[session.targetLine] = text; 
+                currentItem.content = lines.join('\n'); 
                 await db.collection('orders').doc(session.orderId).update({ items: data.items });
                 delete adminSession[userId];
                 ctx.reply(`✅ Baris #${session.targetLine + 1} berhasil diupdate!`);
@@ -293,14 +289,14 @@ bot.on(['text', 'photo'], async (ctx, next) => {
             }
         }
 
-        // 2. TAMBAH PRODUK (LENGKAP)
+        // 2. TAMBAH PRODUK
         else if (session.type === 'ADD_PROD') {
             const d = session.data;
             if (session.step === 'NAME') { d.name = text; session.step = 'CODE'; ctx.reply("🏷 Kode Produk Utama:", cancelBtn); }
             else if (session.step === 'CODE') { d.code = text; session.step = 'PRICE'; ctx.reply("💰 Harga Utama (Angka):", cancelBtn); }
             else if (session.step === 'PRICE') { d.price = parseInt(text); session.step = 'IMG'; ctx.reply("🖼 Kirim **GAMBAR** atau URL Gambar:", cancelBtn); }
             else if (session.step === 'IMG') { 
-                d.image = getPhoto(); // Bisa terima file foto atau URL teks
+                d.image = getPhoto(); 
                 session.step = 'STATS'; 
                 ctx.reply("📊 Fake Sold & View (cth: 100 5000):", cancelBtn); 
             }
@@ -319,7 +315,7 @@ bot.on(['text', 'photo'], async (ctx, next) => {
             }
         }
 
-        // 3. SEARCH USER (FIX EMAIL)
+        // 3. SEARCH USER
         else if (session.type === 'SEARCH_USER') {
             try {
                 let foundDocs = [];
@@ -354,14 +350,15 @@ bot.on(['text', 'photo'], async (ctx, next) => {
         else if (session.type === 'EDIT_VAR') { const ref=db.collection('products').doc(session.prodId); const s=await ref.get(); let v=s.data().variations; v[session.varIdx][session.field]=(session.field==='price')?parseInt(text):text; await ref.update({variations:v}); delete adminSession[userId]; ctx.reply("Variasi Updated."); }
         else if (session.type === 'REPLY_COMPLAIN') { await db.collection('orders').doc(session.orderId).update({adminReply:text, complainResolved:true}); delete adminSession[userId]; ctx.reply("Terkirim."); }
         
-        return;
-
         // 5. SETTING BACKGROUND
         else if (session.type === 'SET_BG') {
             await db.collection('settings').doc('layout').set({ backgroundUrl: getPhoto() }, { merge: true });
             delete adminSession[userId];
             ctx.reply("✅ Background Website Berhasil Diganti!");
         }
+
+        // --- PENTING: RETURN DI SINI AGAR TIDAK LANJUT KE PENCARIAN ---
+        return;
     }
 
     // B. LOGIKA PENCARIAN (Smart Search) - Hanya jika ada teks
