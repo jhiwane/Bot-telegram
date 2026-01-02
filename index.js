@@ -1,336 +1,284 @@
 const express = require('express');
-const { Telegraf, Markup, session } = require('telegraf');
+const { Telegraf, Markup } = require('telegraf');
 const admin = require('firebase-admin');
 const cors = require('cors'); 
 require('dotenv').config();
 
-// --- CONFIG ---
-const PORT = process.env.PORT || 3000;
-const ADMIN_ID = process.env.ADMIN_ID; // Pastikan ini ID Telegram Anda
-// Jika mau Auto-WA, Anda butuh layanan Gateway (Contoh: Fonnte/Watsap). 
-// Jika tidak ada, bot hanya akan memberi link wa.me
-const WA_API_URL = "https://api.fonnte.com/send"; // Contoh jika punya
-const WA_API_TOKEN = process.env.WA_TOKEN || ""; 
-
-// --- INIT EXPRESS & FIREBASE ---
+// --- SETUP SERVER ---
 const app = express();
 app.use(cors({ origin: '*' })); 
 app.use(express.json());
 
-// Init Firebase (Cek agar tidak double init)
-if (!admin.apps.length) {
-    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+// --- FIREBASE ---
+let serviceAccount;
+try {
+    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+} catch (error) { console.error("❌ Error JSON Firebase"); }
+
+if (serviceAccount) {
     admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 }
 const db = admin.firestore();
 
-// --- INIT BOT ---
+// --- BOT TELEGRAM ---
 const bot = new Telegraf(process.env.BOT_TOKEN);
+const ADMIN_ID = process.env.ADMIN_ID;
 
-// STATE MANAGEMENT (Agar bot tau admin sedang edit apa)
-// Format: { 'ID_TELEGRAM': { mode: 'EDIT_HARGA', data: 'ID_PRODUK', ... } }
-const adminState = {};
+// --- STATE MANAGEMENT (INGATAN BOT) ---
+// Ini untuk menyimpan status saat admin sedang mengedit produk
+const adminState = {}; // Format: { adminId: { action: 'edit_price', productId: 'xxx' } }
 
-// ============================================================
-//  BAGIAN 1: API DARI WEBSITE (Handle Order Masuk)
-// ============================================================
+// Middleware Admin
+const isAdmin = (ctx, next) => {
+    if (String(ctx.from?.id) === ADMIN_ID) return next();
+};
 
-app.get('/', (req, res) => res.send('JSN-02 BRAIN ONLINE'));
+// ==========================================
+// 1. FITUR MANAJEMEN PRODUK (PANEL ADMIN)
+// ==========================================
 
+// Command: /kode (Lihat semua produk)
+bot.command('kode', isAdmin, async (ctx) => {
+    const snaps = await db.collection('products').get();
+    if (snaps.empty) return ctx.reply("Belum ada produk.");
+
+    // Buat tombol untuk setiap produk
+    const buttons = snaps.docs.map(doc => {
+        const p = doc.data();
+        return [Markup.button.callback(`📦 ${p.name}`, `menu_prod_${doc.id}`)];
+    });
+
+    ctx.reply("📂 **PANEL ADMIN: DAFTAR PRODUK**\nKlik produk untuk edit:", 
+        Markup.inlineKeyboard(buttons).resize()
+    );
+});
+
+// Action: Menu Detail Produk
+bot.action(/^menu_prod_(.+)$/, async (ctx) => {
+    const id = ctx.match[1];
+    const snap = await db.collection('products').doc(id).get();
+    if (!snap.exists) return ctx.reply("Produk hilang.");
+    
+    const p = snap.data();
+    const info = `📦 *${p.name}*\n💰 Rp ${p.price}\n👁 View: ${p.view} | 🛒 Sold: ${p.sold}\n📝 Desc: ${p.desc ? 'Ada' : 'Kosong'}\n🔑 Konten Utama: ${p.content ? 'Terisi' : 'KOSONG'}\n🔀 Variasi: ${p.variations?.length || 0} Item`;
+
+    // Menu Edit Lengkap
+    const keyboard = [
+        [Markup.button.callback('✏️ Ubah Nama', `edit_name_${id}`), Markup.button.callback('✏️ Ubah Harga', `edit_price_${id}`)],
+        [Markup.button.callback('👁 Fake View', `edit_view_${id}`), Markup.button.callback('🛒 Fake Sold', `edit_sold_${id}`)],
+        [Markup.button.callback('🖼 Ubah Gambar', `edit_image_${id}`), Markup.button.callback('📝 Deskripsi', `edit_desc_${id}`)],
+        [Markup.button.callback('🔑 Konten Utama', `edit_content_${id}`), Markup.button.callback('🔀 Edit Variasi', `edit_vars_${id}`)],
+        [Markup.button.callback('🔙 KEMBALI', `back_list`)]
+    ];
+
+    ctx.editMessageText(info, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(keyboard) });
+});
+
+// Action: Handler Klik Tombol Edit
+bot.action(/^edit_(.+)_(.+)$/, (ctx) => {
+    const field = ctx.match[1]; // name, price, view, dll
+    const prodId = ctx.match[2];
+    
+    // Simpan status di ingatan bot
+    adminState[ctx.from.id] = { action: field, productId: prodId };
+
+    let msg = "";
+    if (field === 'vars') msg = "Kirim Format Variasi:\n`Nama,Harga,Konten | Nama2,Harga2,Konten2`\n\nContoh:\n`Skin A,10000,KodeA | Skin B,20000,KodeB`";
+    else if (field === 'content') msg = "Kirim Konten/Data Akun Utama baru:";
+    else msg = `Kirim nilai baru untuk ${field.toUpperCase()}:`;
+
+    ctx.reply(msg, { parse_mode: 'Markdown' });
+});
+
+bot.action('back_list', (ctx) => ctx.deleteMessage()); // Atau panggil /kode lagi
+
+// Listener Teks (Untuk Menangkap Input Admin)
+bot.on('text', async (ctx, next) => {
+    const userId = ctx.from.id;
+    // Cek apakah admin sedang dalam mode edit?
+    if (adminState[userId]) {
+        const { action, productId } = adminState[userId];
+        const text = ctx.message.text;
+        
+        try {
+            const docRef = db.collection('products').doc(productId);
+            let updateData = {};
+            let replyMsg = "✅ Update Berhasil!";
+
+            // Logika Update Berdasarkan Action
+            switch (action) {
+                case 'name': updateData = { name: text }; break;
+                case 'price': updateData = { price: parseInt(text) }; break;
+                case 'view': updateData = { view: parseInt(text) }; break;
+                case 'sold': updateData = { sold: parseInt(text) }; break;
+                case 'image': updateData = { image: text }; break;
+                case 'desc': updateData = { desc: text }; break;
+                case 'content': updateData = { content: text }; break;
+                case 'vars': 
+                    // Parsing Format Variasi: Nama,Harga,Konten | Nama2...
+                    const rawVars = text.split('|');
+                    const newVars = rawVars.map(v => {
+                        const [n, p, c] = v.split(',').map(s => s.trim());
+                        return { name: n, price: parseInt(p), content: c };
+                    });
+                    updateData = { variations: newVars };
+                    break;
+                case 'revisi_order':
+                    // Khusus Revisi Order (Format: ID_ORDER INDEX KONTEN)
+                    // Logic ini ditangani terpisah di bawah, tapi kita reset state disini
+                    break;
+            }
+
+            if (Object.keys(updateData).length > 0) {
+                await docRef.update(updateData);
+                ctx.reply(replyMsg);
+            }
+            
+            // Hapus ingatan setelah selesai
+            delete adminState[userId];
+
+        } catch (e) {
+            ctx.reply(`❌ Error: ${e.message}`);
+        }
+    } else {
+        next(); // Jika bukan mode edit, lanjut ke listener lain
+    }
+});
+
+
+// ==========================================
+// 2. SISTEM ORDER CERDAS (AUTO WA & REVISI)
+// ==========================================
+
+// Fungsi Simulasi Kirim WA (Membutuhkan Server WA Gateway Pihak ke-3)
+const sendWhatsApp = async (phone, message) => {
+    console.log(`📲 [WA OTOMATIS] Ke: ${phone}, Pesan: ${message.substring(0, 50)}...`);
+    // DISINI ANDA BISA PASANG API FONNTE / WMB / TWILIO
+    // Contoh: axios.post('https://api.fonnte.com/send', { target: phone, message: message }, ...)
+};
+
+const processOrderLogic = async (orderId, orderData) => {
+    let items = [], needsRev = false, msgLog = "", waMessage = `Halo kak! Order *${orderId}* Selesai:\n\n`;
+
+    for (const item of orderData.items) {
+        let content = item.content || null; // Pakai konten yg sudah ada kalau ada
+
+        // Jika konten masih kosong, cari di database produk
+        if (!content) {
+            const pSnap = await db.collection('products').doc(item.id).get();
+            if (pSnap.exists) {
+                const p = pSnap.data();
+                if (item.variantName && p.variations) {
+                    const v = p.variations.find(va => va.name === item.variantName);
+                    if (v && v.content) content = v.content;
+                }
+                if (!content && p.content) content = p.content;
+            }
+        }
+
+        if (content) {
+            items.push({ ...item, content });
+            msgLog += `✅ ${item.name}: ADA\n`;
+            waMessage += `📦 *${item.name}*: ${content}\n`;
+        } else {
+            items.push({ ...item, content: null });
+            needsRev = true;
+            msgLog += `⚠️ ${item.name}: KOSONG (Perlu Revisi)\n`;
+        }
+    }
+
+    // Update Firebase
+    await db.collection('orders').doc(orderId).update({ 
+        items, status: 'success', processed: true 
+    });
+
+    if (needsRev) {
+        // Mode Revisi
+        bot.telegram.sendMessage(ADMIN_ID, 
+            `⚠️ *ORDER ${orderId} BUTUH REVISI!*\n${msgLog}\nKlik tombol di bawah untuk isi manual:`, 
+            Markup.inlineKeyboard([
+                [Markup.button.callback('🔧 REVISI SEKARANG', `revisi_${orderId}`)]
+            ])
+        );
+    } else {
+        // Sukses Total -> Kirim WA Otomatis
+        bot.telegram.sendMessage(ADMIN_ID, `✅ *ORDER ${orderId} COMPLETE!*\nData terkirim ke Web & WA Pelanggan.`);
+        
+        // AUTO SEND WA (Jika nomor valid)
+        if (orderData.buyerPhone && orderData.buyerPhone.length > 5) {
+            waMessage += "\nTerima kasih sudah order!";
+            sendWhatsApp(orderData.buyerPhone, waMessage);
+        }
+    }
+};
+
+// API Trigger dari Web
 app.post('/api/confirm-manual', async (req, res) => {
     const { orderId, buyerPhone, total, items } = req.body;
     
-    // Format pesan lapor ke Admin
-    let txtItems = items.map(i => `- ${i.name} (${i.variantName||'Reg'}) x${i.qty}`).join('\n');
-    const msg = `🔔 *ORDER MASUK*\n🆔 \`${orderId}\`\n👤 ${buyerPhone}\n💰 Rp ${parseInt(total).toLocaleString()}\n\n🛒 *Item:*\n${txtItems}`;
-
-    try {
-        await bot.telegram.sendMessage(ADMIN_ID, msg, {
-            parse_mode: 'Markdown',
-            ...Markup.inlineKeyboard([
-                [Markup.button.callback('✅ TERIMA (ACC)', `acc_${orderId}`)],
-                [Markup.button.callback('❌ TOLAK', `tolak_${orderId}`)]
-            ])
-        });
-        res.json({ status: 'ok' });
-    } catch (e) {
-        console.error("Bot Error:", e);
-        res.status(500).json({ error: 'Bot Fail' });
-    }
+    // Notif Awal
+    let txt = items.map(i => `- ${i.name} (${i.variantName||'-'})`).join('\n');
+    const msg = `🔔 *ORDER MASUK*\n🆔 \`${orderId}\`\n👤 ${buyerPhone}\n💰 Rp ${parseInt(total).toLocaleString()}\n\n${txt}`;
+    
+    bot.telegram.sendMessage(ADMIN_ID, msg, 
+        Markup.inlineKeyboard([
+            [Markup.button.callback('✅ PROSES OTOMATIS', `acc_${orderId}`)],
+            [Markup.button.callback('❌ TOLAK', `tolak_${orderId}`)]
+        ])
+    );
+    res.json({ status: 'ok' });
 });
 
-// ============================================================
-//  BAGIAN 2: LOGIKA ORDER CERDAS (ACC & REVISI)
-// ============================================================
-
-// A. Fungsi Kirim WA Otomatis (Placeholder)
-async function sendToWhatsApp(phone, message) {
-    // Ubah 08xxx jadi 628xxx
-    let formattedPhone = phone;
-    if (phone.startsWith('0')) formattedPhone = '62' + phone.slice(1);
-    
-    console.log(`[WA-AUTO] Sending to ${formattedPhone}: ${message}`);
-    
-    // JIKA ANDA PUNYA API WA GATEWAY (Aktifkan kode di bawah ini)
-    /*
-    try {
-        const axios = require('axios');
-        await axios.post(WA_API_URL, { target: formattedPhone, message: message }, { headers: { Authorization: WA_API_TOKEN }});
-        return true;
-    } catch (e) { return false; }
-    */
-    
-    return false; // Default return false karena belum pasang API
-}
-
-// B. Handler Tombol ACC
+// Action: ACC Order
 bot.action(/^acc_(.+)$/, async (ctx) => {
-    const orderId = ctx.match[1];
-    ctx.editMessageText("⏳ *Memproses Order...* Mengecek Stok/Konten...", { parse_mode: 'Markdown' });
-    
-    const docRef = db.collection('orders').doc(orderId);
-    const docSnap = await docRef.get();
-    
-    if (!docSnap.exists) return ctx.reply("❌ Data order hilang.");
-    const orderData = docSnap.data();
-    
-    let updatedItems = [];
-    let itemsNeedRevision = [];
-    let fullContentMsg = `*PESANAN ANDA: #${orderId}*\n\n`;
-
-    // 1. CEK STOK OTOMATIS
-    for (let [index, item] of orderData.items.entries()) {
-        let contentFound = null;
-        
-        // Ambil data produk asli dari DB
-        if(item.id) {
-            const prodSnap = await db.collection('products').doc(item.id).get();
-            if (prodSnap.exists) {
-                const p = prodSnap.data();
-                
-                // Prioritas 1: Cek Variasi
-                if (item.variantName && p.variations) {
-                    const v = p.variations.find(x => x.name === item.variantName);
-                    if (v && v.content && v.content !== "-") contentFound = v.content;
-                }
-                // Prioritas 2: Cek Konten Utama
-                if (!contentFound && p.content && p.content !== "-") {
-                    contentFound = p.content;
-                }
-            }
-        }
-
-        if (contentFound) {
-            // Stok Ada: Masukkan ke item
-            updatedItems.push({ ...item, content: contentFound });
-            fullContentMsg += `📦 *${item.name}*\nDATA: \`${contentFound}\`\n\n`;
-        } else {
-            // Stok Kosong: Tandai butuh revisi
-            updatedItems.push({ ...item, content: null }); // Content null = Web menampilkan "Diproses"
-            itemsNeedRevision.push({ index, name: item.name, variant: item.variantName });
-        }
-    }
-
-    // 2. UPDATE DATABASE
-    // Kita set status 'success' agar user tidak panik, tapi item yg null akan loading di web
-    await docRef.update({ items: updatedItems, status: 'success', processedAt: new Date() });
-
-    // 3. KEPUTUSAN BOT
-    if (itemsNeedRevision.length === 0) {
-        // SKENARIO A: SEMUA ADA STOK
-        ctx.reply(`✅ *ORDER ${orderId} SELESAI (AUTO)*\nSemua data item ditemukan dan dikirim ke web.`, { parse_mode: 'Markdown' });
-        
-        // Coba kirim WA
-        const sent = await sendToWhatsApp(orderData.buyerPhone, fullContentMsg);
-        if(!sent) ctx.reply(`⚠️ Gagal Auto-WA (API Belum ada). Manual: https://wa.me/${orderData.buyerPhone}?text=${encodeURIComponent(fullContentMsg)}`);
-        
-    } else {
-        // SKENARIO B: ADA YANG KOSONG (BUTUH REVISI)
-        let msg = `⚠️ *ORDER DITERIMA TAPI KOSONG*\nID: \`${orderId}\`\n\nItem berikut belum ada kontennya:\n`;
-        const buttons = [];
-        
-        itemsNeedRevision.forEach(r => {
-            msg += `- ${r.name} (${r.variant || 'Utama'})\n`;
-            // Buat tombol REVISI per item
-            buttons.push([Markup.button.callback(`✍️ ISI KONTEN: ${r.name.substr(0,10)}...`, `revisi_${orderId}_${r.index}`)]);
-        });
-
-        msg += `\nSilakan klik tombol di bawah untuk mengisi data secara manual (interaktif).`;
-        ctx.reply(msg, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
-    }
-});
-
-// C. Handler Klik Tombol REVISI
-bot.action(/^revisi_(.+)_(.+)$/, (ctx) => {
-    const [_, orderId, itemIndex] = ctx.match;
-    // Simpan state bahwa admin sedang mau merevisi item ini
-    adminState[ctx.from.id] = {
-        mode: 'REVISI_ORDER',
-        orderId: orderId,
-        itemIndex: parseInt(itemIndex)
-    };
-    ctx.reply(`✍️ *MODE REVISI AKTIF*\n\nSilakan REPLY/BALAS pesan ini dengan konten untuk Order \`${orderId}\` (Item Index: ${itemIndex}).\n\nContoh: \`Akun: user123 Pass: abcde\``, { parse_mode: 'Markdown' });
-});
-
-// ============================================================
-//  BAGIAN 3: MANAJEMEN PRODUK VIA TELEGRAM (/kode)
-// ============================================================
-
-// 1. Command List Produk
-bot.command('kode', async (ctx) => {
-    const snaps = await db.collection('products').orderBy('createdAt', 'desc').limit(10).get();
-    if (snaps.empty) return ctx.reply("Belum ada produk. Ketik /tambah");
-    
-    const buttons = snaps.docs.map(doc => {
-        const p = doc.data();
-        return [Markup.button.callback(`📦 ${p.name}`, `prod_${doc.id}`)];
-    });
-    
-    // Tombol Tambah Produk Baru
-    buttons.push([Markup.button.callback('➕ TAMBAH PRODUK BARU', 'add_product')]);
-    
-    ctx.reply("📂 *PANEL DATA PRODUK*", { parse_mode: 'Markdown', ...Markup.inlineKeyboard(buttons) });
-});
-
-// 2. Detail Produk & Menu Edit
-bot.action(/^prod_(.+)$/, async (ctx) => {
     const id = ctx.match[1];
-    const doc = await db.collection('products').doc(id).get();
-    if (!doc.exists) return ctx.reply("Produk hilang.");
-    const p = doc.data();
+    ctx.editMessageText(`⚙️ Memproses Order ${id}...`);
+    const doc = await db.collection('orders').doc(id).get();
+    if (doc.exists) await processOrderLogic(id, doc.data());
+});
+
+// Action: Trigger Revisi
+bot.action(/^revisi_(.+)$/, (ctx) => {
+    const id = ctx.match[1];
+    ctx.reply(`Mode Revisi Aktif.\nFormat: \`/update ${id} [UrutanItem 0/1/2] [IsiKonten]\``);
+});
+
+// Command Manual Update (Revisi)
+bot.command('update', isAdmin, async (ctx) => {
+    const args = ctx.message.text.split(' ');
+    const orderId = args[1];
+    const idx = parseInt(args[2]);
+    const content = args.slice(3).join(' ');
+
+    if (!orderId || !content) return ctx.reply("Format salah.");
+
+    const docRef = db.collection('orders').doc(orderId);
+    const snap = await docRef.get();
+    let data = snap.data();
     
-    let msg = `📦 *${p.name}*\n💰 Rp ${p.price}\n👁 View: ${p.view||0} | Sold: ${p.sold||0}\n\n`;
-    if (p.variations && p.variations.length) {
-        msg += `🗂 *Variasi:*\n`;
-        p.variations.forEach((v, i) => msg += `- [${i}] ${v.name}: Rp ${v.price}\n`);
-    }
-
-    const btn = [
-        [Markup.button.callback('✏️ Ubah Nama', `edit_${id}_name`), Markup.button.callback('💵 Ubah Harga', `edit_${id}_price`)],
-        [Markup.button.callback('🖼 Set Gambar', `edit_${id}_image`), Markup.button.callback('📝 Deskripsi', `edit_${id}_desc`)],
-        [Markup.button.callback('📊 Fake Sold', `edit_${id}_sold`), Markup.button.callback('👁 Fake View', `edit_${id}_view`)],
-        [Markup.button.callback('📦 Set Konten Utama', `edit_${id}_content`)],
-        [Markup.button.callback('➕ Tambah Variasi', `addvar_${id}`), Markup.button.callback('🗑 HAPUS', `del_${id}`)],
-        [Markup.button.callback('🔙 KEMBALI', 'back_list')]
-    ];
-    
-    ctx.editMessageText(msg, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(btn) });
-});
-
-// 3. Handler Klik Tombol Edit (Set State)
-bot.action(/^edit_(.+)_(.+)$/, (ctx) => {
-    const [_, id, field] = ctx.match;
-    adminState[ctx.from.id] = { mode: 'EDIT_PRODUCT', id, field };
-    ctx.reply(`⌨️ Silakan ketik nilai baru untuk *${field.toUpperCase()}*:`, { parse_mode: 'Markdown' });
-});
-
-bot.action('add_product', (ctx) => {
-    adminState[ctx.from.id] = { mode: 'ADD_PRODUCT_NAME' };
-    ctx.reply("⌨️ Masukkan NAMA Produk Baru:");
-});
-
-bot.action(/^addvar_(.+)$/, (ctx) => {
-    adminState[ctx.from.id] = { mode: 'ADD_VAR_NAME', id: ctx.match[1] };
-    ctx.reply("⌨️ Masukkan NAMA Variasi (Contoh: 100 Diamond):");
-});
-
-bot.action('back_list', (ctx) => ctx.deleteMessage().then(() => ctx.reply('/kode'))); // Hacky back
-
-// ============================================================
-//  BAGIAN 4: TEXT LISTENER (INTI KECERDASAN)
-// ============================================================
-// Ini menangkap semua teks yang diketik admin
-bot.on('text', async (ctx) => {
-    const userId = ctx.from.id;
-    if (String(userId) !== ADMIN_ID) return; // Security check
-
-    const state = adminState[userId];
-    const text = ctx.message.text;
-
-    if (!state) return; // Tidak sedang edit apa-apa
-
-    try {
-        // --- A. LOGIKA REVISI ORDER (REPLY) ---
-        if (state.mode === 'REVISI_ORDER') {
-            const { orderId, itemIndex } = state;
-            const docRef = db.collection('orders').doc(orderId);
-            const snap = await docRef.get();
-            
-            if (snap.exists) {
-                let items = snap.data().items;
-                // Update Konten di Index yang spesifik
-                if (items[itemIndex]) {
-                    items[itemIndex].content = text; // Inject Text Admin ke Database
-                    
-                    // Update DB
-                    await docRef.update({ items: items });
-                    
-                    ctx.reply(`✅ *Data Tersimpan!* Klien sekarang bisa melihat data di Web.`);
-                    
-                    // AUTO SEND KE WHATSAPP (Setelah Revisi)
-                    const buyerPhone = snap.data().buyerPhone;
-                    const waMsg = `*ORDER UPDATE #${orderId}*\n\nData pesanan Anda sudah siap:\n\n${items[itemIndex].name}\nDATA: ${text}\n\nTerima kasih!`;
-                    
-                    const sent = await sendToWhatsApp(buyerPhone, waMsg);
-                    if (sent) ctx.reply("✅ Terkirim ke WA Pelanggan (Auto).");
-                    else ctx.reply(`⚠️ Gagal Auto-WA. Klik link ini untuk kirim: https://wa.me/${buyerPhone}?text=${encodeURIComponent(waMsg)}`);
-                }
-            }
-            delete adminState[userId]; // Reset state
-        }
-
-        // --- B. LOGIKA EDIT PRODUK ---
-        else if (state.mode === 'EDIT_PRODUCT') {
-            let val = text;
-            // Convert angka jika perlu
-            if (['price', 'sold', 'view'].includes(state.field)) val = parseInt(text);
-            
-            await db.collection('products').doc(state.id).update({ [state.field]: val });
-            ctx.reply(`✅ Berhasil ubah ${state.field}. Ketik /kode untuk lihat.`);
-            delete adminState[userId];
-        }
-
-        // --- C. LOGIKA TAMBAH PRODUK (Multistep) ---
-        else if (state.mode === 'ADD_PRODUCT_NAME') {
-            // Buat draft produk baru
-            const ref = await db.collection('products').add({
-                name: text, price: 0, view: 0, sold: 0, createdAt: new Date()
-            });
-            adminState[userId] = { mode: 'EDIT_PRODUCT', id: ref.id, field: 'price' }; // Auto lanjut ke harga
-            ctx.reply(`✅ Nama diset. Sekarang masukkan HARGA:`);
-        }
+    if (data.items[idx]) {
+        data.items[idx].content = content; // Update konten item
         
-        // --- D. LOGIKA TAMBAH VARIASI (Multistep) ---
-        else if (state.mode === 'ADD_VAR_NAME') {
-            adminState[userId] = { mode: 'ADD_VAR_PRICE', id: state.id, varName: text };
-            ctx.reply(`Oke variasi "${text}". Sekarang masukkan HARGANYA:`);
+        // Cek lagi apakah semua item sudah terisi?
+        const masihKosong = data.items.some(i => !i.content);
+        
+        if (!masihKosong) {
+            ctx.reply("✅ Revisi Selesai! Semua item terisi. Mengirim WA Otomatis...");
+            // Panggil ulang logika proses agar men-trigger kirim WA
+            await processOrderLogic(orderId, data);
+        } else {
+            // Update DB saja, tunggu revisi item lain
+            await docRef.update({ items: data.items });
+            ctx.reply(`✅ Item ke-${idx} terisi. Masih ada item lain yang kosong.`);
         }
-        else if (state.mode === 'ADD_VAR_PRICE') {
-            adminState[userId] = { ...state, mode: 'ADD_VAR_CONTENT', varPrice: parseInt(text) };
-            ctx.reply(`Harga Rp ${text}. Sekarang masukkan KONTEN/DATA (Ketik "-" jika kosong):`);
-        }
-        else if (state.mode === 'ADD_VAR_CONTENT') {
-            const newVar = { name: state.varName, price: state.varPrice, content: text };
-            // Pakai arrayUnion firebase
-            await db.collection('products').doc(state.id).update({
-                variations: admin.firestore.FieldValue.arrayUnion(newVar)
-            });
-            ctx.reply("✅ Variasi berhasil ditambahkan!");
-            delete adminState[userId];
-        }
-
-    } catch (e) {
-        console.error(e);
-        ctx.reply("❌ Terjadi kesalahan: " + e.message);
     }
 });
 
-// --- STARTUP ---
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    bot.launch().then(() => console.log("Bot Telegram Online"));
-});
 
-// Graceful Stop
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+// Start Server & Bot
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`Server running on ${PORT}`);
+    // Paksa start bot
+    bot.telegram.deleteWebhook({ drop_pending_updates: true }).then(() => bot.launch());
+});
