@@ -2,8 +2,12 @@ const express = require('express');
 const { Telegraf, Markup } = require('telegraf');
 const admin = require('firebase-admin');
 const cors = require('cors'); 
+// const fetch = require('node-fetch'); 
 require('dotenv').config();
 
+// ==========================================
+// 1. SETUP SERVER & CONFIG
+// ==========================================
 const app = express();
 app.use(cors({ origin: '*' })); 
 app.use(express.json());
@@ -12,7 +16,7 @@ const PORT = process.env.PORT || 3000;
 const ADMIN_ID = process.env.ADMIN_ID;
 const adminSession = {}; 
 
-// --- FIREBASE ---
+// --- FIREBASE SETUP ---
 let serviceAccount;
 try {
     serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
@@ -20,13 +24,31 @@ try {
 } catch (error) { console.error("❌ Firebase Error:", error.message); }
 const db = admin.firestore();
 
-// --- TELEGRAM BOT ---
+// --- TELEGRAM BOT SETUP ---
 const bot = new Telegraf(process.env.BOT_TOKEN);
 const cancelBtn = Markup.inlineKeyboard([Markup.button.callback('❌ BATAL', 'cancel_action')]);
 
 // ==========================================
-// A. CORE LOGIC (STOCK & ORDER)
+// 2. SECURITY & CORE LOGIC
 // ==========================================
+const validateOrderSecurity = async (orderId, orderData) => {
+    let calculatedTotal = 0;
+    for (const item of orderData.items) {
+        const prodRef = db.collection('products').doc(item.id);
+        const prodSnap = await prodRef.get();
+        if (!prodSnap.exists) continue;
+        const p = prodSnap.data();
+        let realPrice = p.price;
+        if (item.variantName && item.variantName !== 'Regular' && p.variations) {
+            const variant = p.variations.find(v => v.name === item.variantName);
+            if (variant) realPrice = parseInt(variant.price);
+        }
+        calculatedTotal += (realPrice * item.qty);
+    }
+    if (orderData.total < (calculatedTotal - 500)) return { isSafe: false, realTotal: calculatedTotal };
+    return { isSafe: true };
+};
+
 const processStock = async (productId, variantName, qtyNeeded) => {
     const docRef = db.collection('products').doc(productId);
     return await db.runTransaction(async (t) => {
@@ -120,28 +142,7 @@ const processOrderLogic = async (orderId, orderData) => {
 };
 
 // ==========================================
-// B. SECURITY CHECK
-// ==========================================
-const validateOrderSecurity = async (orderId, orderData) => {
-    let calculatedTotal = 0;
-    for (const item of orderData.items) {
-        const prodRef = db.collection('products').doc(item.id);
-        const prodSnap = await prodRef.get();
-        if (!prodSnap.exists) continue;
-        const p = prodSnap.data();
-        let realPrice = p.price;
-        if (item.variantName && item.variantName !== 'Regular' && p.variations) {
-            const variant = p.variations.find(v => v.name === item.variantName);
-            if (variant) realPrice = parseInt(variant.price);
-        }
-        calculatedTotal += (realPrice * item.qty);
-    }
-    if (orderData.total < (calculatedTotal - 500)) return { isSafe: false, realTotal: calculatedTotal };
-    return { isSafe: true };
-};
-
-// ==========================================
-// C. API WEBHOOKS
+// 3. API WEBHOOKS
 // ==========================================
 app.post('/api/confirm-manual', async (req, res) => {
     const { orderId, buyerPhone, total, items } = req.body;
@@ -180,19 +181,18 @@ app.post('/api/notify-order', async (req, res) => {
 app.get('/', (req, res) => res.send('JSN-02 READY'));
 
 // ==========================================
-// D. BOT CONTROLLER (FIXED FLOW)
+// 4. BOT BRAIN (UNIVERSAL SEARCH)
 // ==========================================
 const mainMenu = Markup.inlineKeyboard([
     [Markup.button.callback('➕ TAMBAH PRODUK', 'add_prod')],
     [Markup.button.callback('⏳ LIST PENDING', 'list_pending'), Markup.button.callback('📦 CEK SEMUA STOK', 'list_all_stock')],
-    [Markup.button.callback('👥 USER', 'manage_users'), Markup.button.callback('💳 PAYMENT', 'set_payment')],
+    [Markup.button.callback('👥 PANDUAN USER', 'manage_users'), Markup.button.callback('💳 PAYMENT', 'set_payment')],
     [Markup.button.callback('🎨 GANTI BACKGROUND', 'set_bg')],
     [Markup.button.callback('💰 SALES', 'sales_today'), Markup.button.callback('🚨 KOMPLAIN', 'list_complain')]
 ]);
 
-bot.command('admin', (ctx) => ctx.reply("🛠 *PANEL ADMIN*\nMenu Utama:", mainMenu));
+bot.command('admin', (ctx) => ctx.reply("🛠 *PANEL ADMIN*\nKetik APAPUN (Kode Produk / Email / ID Order) untuk mencari.", mainMenu));
 
-// --- UNIFIED LISTENER (FIX USER SEARCH BUG) ---
 bot.on(['text', 'photo', 'document'], async (ctx, next) => {
     if (String(ctx.from.id) !== ADMIN_ID) return next();
     
@@ -210,50 +210,14 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
         text = ctx.message.text ? ctx.message.text.trim() : '';
     }
 
+    const textLower = text.toLowerCase();
     const userId = ctx.from.id;
     const session = adminSession[userId];
 
-    // 1. JIKA ADA SESI AKTIF -> MASUK SINI
+    // --- 1. JIKA SEDANG ADA SESI WIZARD (INPUT BERTAHAP) ---
     if (session) {
-        // --- A. USER MANAGEMENT (PERBAIKAN UTAMA) ---
-        if (session.type === 'SEARCH_USER') {
-            try {
-                let foundDocs = [];
-                const cleanText = text.trim(); 
-                // Cari by Email
-                let snap = await db.collection('users').where('email', '==', cleanText).get();
-                if (snap.empty) snap = await db.collection('users').where('email', '==', cleanText.toLowerCase()).get();
-                if (!snap.empty) foundDocs = snap.docs;
-                
-                // Cari by UID
-                if (foundDocs.length === 0) { 
-                    const r = await db.collection('users').doc(cleanText).get(); 
-                    if(r.exists) foundDocs=[r]; 
-                }
-                
-                if (foundDocs.length > 0) {
-                    const u = foundDocs[0].data(); 
-                    const uid = foundDocs[0].id;
-                    ctx.reply(
-                        `👤 *USER FOUND*\n🆔 \`${uid}\`\n📧 ${u.email||'Anon'}\n💰 Rp ${u.balance?.toLocaleString() || 0}`, 
-                        { parse_mode: 'Markdown', ...Markup.inlineKeyboard([
-                            [Markup.button.callback('💵 Top Up Saldo', `topup_${uid}`)],
-                            [Markup.button.callback('💸 Potong Saldo', `deduct_${uid}`)],
-                            [Markup.button.callback('🚫 Banned User', `ban_user_${uid}`)]
-                        ])}
-                    );
-                    delete adminSession[userId];
-                } else {
-                    ctx.reply("❌ User tidak ditemukan. Coba Email / UID lain.");
-                }
-            } catch(e) { ctx.reply("Eror: "+e.message); }
-            return;
-        }
-        else if (session.type === 'TOPUP_USER') { await db.collection('users').doc(session.targetUid).update({balance:admin.firestore.FieldValue.increment(parseInt(text))}); delete adminSession[userId]; ctx.reply("✅ Saldo Ditambah."); return;}
-        else if (session.type === 'DEDUCT_USER') { await db.collection('users').doc(session.targetUid).update({balance:admin.firestore.FieldValue.increment(-parseInt(text))}); delete adminSession[userId]; ctx.reply("✅ Saldo Dipotong."); return;}
-
-        // --- B. REVISI & SMART FILL ---
-        else if (session.type === 'REVISI') {
+        // ... (REVISI LOGIC) ...
+        if (session.type === 'REVISI') {
             if (!isNaN(text) && parseInt(text) > 0 && text.length < 5) {
                 session.targetLine = parseInt(text) - 1; session.type = 'REVISI_LINE_INPUT'; ctx.reply(`🔧 Kirim data baru baris #${text}:`, cancelBtn);
             } else {
@@ -274,8 +238,7 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
             else { delete adminSession[userId]; ctx.reply("❌ Baris salah."); }
             return;
         }
-
-        // --- C. ADD PRODUK ---
+        // ... (ADD PROD LOGIC) ...
         else if (session.type === 'ADD_PROD') {
             const d = session.data;
             if (session.step === 'NAME') { d.name = text; session.step = 'CODE'; ctx.reply("🏷 Kode Produk:", cancelBtn); }
@@ -297,8 +260,9 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
             else if (session.step === 'VAR_PERM') { session.tempVar.isPermanent = text.toLowerCase() === 'ya'; d.variations.push(session.tempVar); session.step='VARS'; ctx.reply("✅ Lanjut? (ya/tidak)", cancelBtn); }
             return;
         }
-
-        // --- D. SETTINGS & EDIT ---
+        // ... (SETTINGS & USER LOGIC) ...
+        else if (session.type === 'TOPUP_USER') { await db.collection('users').doc(session.targetUid).update({balance:admin.firestore.FieldValue.increment(parseInt(text))}); delete adminSession[userId]; ctx.reply("✅ Saldo Ditambah."); return;}
+        else if (session.type === 'DEDUCT_USER') { await db.collection('users').doc(session.targetUid).update({balance:admin.firestore.FieldValue.increment(-parseInt(text))}); delete adminSession[userId]; ctx.reply("✅ Saldo Dipotong."); return;}
         else if (session.type === 'SET_PAYMENT') {
             if(session.step === 'BANK') { session.data.bank=text; session.step='NO'; ctx.reply("Nomor:", cancelBtn); }
             else if(session.step === 'NO') { session.data.no=text; session.step='AN'; ctx.reply("Atas Nama:", cancelBtn); }
@@ -312,24 +276,83 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
         else if (session.type === 'REPLY_COMPLAIN') { await db.collection('orders').doc(session.orderId).update({adminReply:text, complainResolved:true}); delete adminSession[userId]; ctx.reply("Terkirim."); return; }
     }
 
-    // 2. JIKA TIDAK ADA SESI -> SMART SEARCH
+    // --- 2. JIKA TIDAK ADA SESI -> UNIVERSAL SEARCH (MATA ELANG) ---
+    // Logika ini akan berjalan kapanpun Anda mengetik sesuatu di bot
     if (text) {
-        // Cek Order
-        const orderSnap = await db.collection('orders').doc(text).get();
-        if (orderSnap.exists) {
-            const o = orderSnap.data();
-            return ctx.reply(`📦 *ORDER ${orderSnap.id}*\nStatus: ${o.status}\nItems: ${o.items.length}`, {parse_mode:'Markdown',...Markup.inlineKeyboard([[Markup.button.callback('🛠 MENU EDIT', `menu_edit_ord_${orderSnap.id}`)],[Markup.button.callback('🗑 HAPUS', `del_order_${orderSnap.id}`)]])});
-        }
-        // Cek Produk
-        const allProds = await db.collection('products').get(); let found=null;
-        allProds.forEach(doc => { const p=doc.data(); if((p.code && p.code.toLowerCase()===textLower)||(p.variations&&p.variations.some(v=>v.code.toLowerCase()===textLower))) found={id:doc.id,...p}; });
-        if(found) return ctx.reply(`🔎 ${found.name}`, Markup.inlineKeyboard([[Markup.button.callback('✏️ Edit Utama', `menu_edit_main_${found.id}`)],[Markup.button.callback('🔀 ATUR VARIASI', `menu_vars_${found.id}`)],[Markup.button.callback('🗑️ Hapus', `del_prod_${found.id}`)]]));
-        
-        ctx.reply("❌ Tidak ditemukan (Order/Produk).");
+        ctx.reply("🔍 Sedang mencari...");
+
+        // A. CEK ORDER ID
+        try {
+            const orderSnap = await db.collection('orders').doc(text).get();
+            if (orderSnap.exists) {
+                const o = orderSnap.data();
+                return ctx.reply(`📦 *ORDER ${orderSnap.id}*\nStatus: ${o.status}\nItems: ${o.items.length}\nUser: ${o.buyerPhone}`, {parse_mode:'Markdown',...Markup.inlineKeyboard([[Markup.button.callback('🛠 MENU EDIT', `menu_edit_ord_${orderSnap.id}`)],[Markup.button.callback('🗑 HAPUS', `del_order_${orderSnap.id}`)]])});
+            }
+        } catch(e){}
+
+        // B. CEK PRODUK (KODE UTAMA & VARIASI)
+        try {
+            const allProds = await db.collection('products').get();
+            let found = null;
+            allProds.forEach(doc => { 
+                const p = doc.data(); 
+                // Cek kode utama ATAU kode variasi (case insensitive)
+                if ((p.code && p.code.toLowerCase() === textLower) || (p.variations && p.variations.some(v => v.code && v.code.toLowerCase() === textLower))) {
+                    found = { id: doc.id, ...p };
+                }
+            });
+            if (found) {
+                return ctx.reply(`🔎 *${found.name}*\n🏷 Kode: ${found.code}\n💰 Rp ${found.price}`, {
+                    parse_mode: 'Markdown',
+                    ...Markup.inlineKeyboard([
+                        [Markup.button.callback('✏️ Edit Utama', `menu_edit_main_${found.id}`)],
+                        [Markup.button.callback('🔀 ATUR VARIASI', `menu_vars_${found.id}`)],
+                        [Markup.button.callback('🗑️ Hapus', `del_prod_${found.id}`)]
+                    ])
+                });
+            }
+        } catch(e){}
+
+        // C. CEK USER (EMAIL atau UID)
+        try {
+            let foundUser = null;
+            let targetUid = null;
+            const cleanText = text.trim();
+
+            // Cek by Email
+            let userSnap = await db.collection('users').where('email', '==', cleanText).get();
+            if (userSnap.empty) userSnap = await db.collection('users').where('email', '==', cleanText.toLowerCase()).get();
+            
+            if (!userSnap.empty) {
+                foundUser = userSnap.docs[0].data();
+                targetUid = userSnap.docs[0].id;
+            } else {
+                // Cek by UID (Dokumen ID langsung)
+                const uidDoc = await db.collection('users').doc(cleanText).get();
+                if (uidDoc.exists) {
+                    foundUser = uidDoc.data();
+                    targetUid = uidDoc.id;
+                }
+            }
+
+            if (foundUser) {
+                return ctx.reply(
+                    `👤 *USER DITEMUKAN*\n🆔 \`${targetUid}\`\n📧 ${foundUser.email||'Anon'}\n💰 Saldo: Rp ${foundUser.balance?.toLocaleString() || 0}`, 
+                    { parse_mode: 'Markdown', ...Markup.inlineKeyboard([
+                        [Markup.button.callback('💵 TAMBAH SALDO', `topup_${targetUid}`)],
+                        [Markup.button.callback('💸 POTONG SALDO', `deduct_${targetUid}`)],
+                        [Markup.button.callback('🚫 BANNED AKUN', `ban_user_${targetUid}`)]
+                    ])}
+                );
+            }
+        } catch(e){}
+
+        // D. JIKA SEMUA GAGAL
+        ctx.reply("❌ Tidak ditemukan (Order/Produk/User).");
     }
 });
 
-// --- TOMBOL HANDLERS ---
+// --- ACTION HANDLERS ---
 bot.action('list_pending', async (ctx) => {
     const s = await db.collection('orders').where('status', '==', 'pending').get();
     if (s.empty) return ctx.reply("✅ Aman.");
@@ -350,7 +373,7 @@ bot.action('list_all_stock', async (ctx) => {
     else ctx.reply(msg, {parse_mode:'Markdown'});
 });
 bot.action('set_bg', (ctx) => { adminSession[ctx.from.id] = { type: 'SET_BG' }; ctx.reply("🖼 Kirim **URL/GAMBAR**:", cancelBtn); });
-bot.action('manage_users', (ctx) => { adminSession[ctx.from.id] = { type: 'SEARCH_USER' }; ctx.reply("🔍 Kirim **Email** atau **UID User**:", cancelBtn); });
+bot.action('manage_users', (ctx) => { ctx.reply("🔍 Ketik langsung **EMAIL** atau **UID** di chat untuk mencari user."); });
 bot.action(/^topup_(.+)$/, (ctx)=>{ adminSession[ctx.from.id]={type:'TOPUP_USER', targetUid:ctx.match[1]}; ctx.reply("Nominal:", cancelBtn); });
 bot.action(/^deduct_(.+)$/, (ctx)=>{ adminSession[ctx.from.id]={type:'DEDUCT_USER', targetUid:ctx.match[1]}; ctx.reply("Nominal:", cancelBtn); });
 bot.action(/^ban_user_(.+)$/, async (ctx)=>{ await db.collection('users').doc(ctx.match[1]).delete(); ctx.editMessageText("Banned."); });
