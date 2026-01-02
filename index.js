@@ -173,16 +173,17 @@ bot.on('text', async (ctx, next) => {
             else if (session.step === 'VAR_CONTENT') { session.tempVar.content=text; d.variations.push(session.tempVar); session.step='VARS'; ctx.reply("✅ Variasi OK. Ada lagi? (ya/tidak)", cancelBtn); }
         }
 
-        // --- MANAJEMEN USER (SEARCH LOGIC - FIX EMAIL) ---
+        // --- MANAJEMEN USER (SEARCH LOGIC - PINTAR) ---
         else if (session.type === 'SEARCH_USER') {
             try {
                 let foundDocs = [];
-                const cleanText = text.trim(); // Hapus spasi depan/belakang
+                // Hapus spasi depan/belakang biar tidak gagal search
+                const cleanText = text.trim(); 
 
                 // 1. Cari by Email (Exact Match)
                 let snap = await db.collection('users').where('email', '==', cleanText).get();
                 
-                // 2. Jika tidak ketemu, coba cari by Email (Lowercase conversion - jaga2 user ngetik huruf besar)
+                // 2. Jika gagal, Cari by Email (Huruf Kecil semua) - Jaga2 user ngetik "Budi@..."
                 if (snap.empty) {
                      snap = await db.collection('users').where('email', '==', cleanText.toLowerCase()).get();
                 }
@@ -195,6 +196,7 @@ bot.on('text', async (ctx, next) => {
                     if (docRef.exists) foundDocs = [docRef];
                 }
 
+                // ... (Sisanya sama: Tampilkan menu Topup)
                 if (foundDocs.length > 0) {
                     const u = foundDocs[0].data();
                     const uid = foundDocs[0].id;
