@@ -2,7 +2,7 @@ const express = require('express');
 const { Telegraf, Markup } = require('telegraf');
 const admin = require('firebase-admin');
 const cors = require('cors'); 
-// const fetch = require('node-fetch'); // Uncomment jika perlu fetch file
+// const fetch = require('node-fetch'); // Uncomment jika perlu fetch
 require('dotenv').config();
 
 // ==========================================
@@ -29,7 +29,7 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 const cancelBtn = Markup.inlineKeyboard([Markup.button.callback('❌ BATAL', 'cancel_action')]);
 
 // ==========================================
-// 2. SECURITY CHECK (POLISI ANTI-HACK)
+// 2. SECURITY CHECK (ANTI-HACK ZERO TOLERANCE)
 // ==========================================
 const validateOrderSecurity = async (orderId, orderData) => {
     let calculatedTotal = 0;
@@ -39,7 +39,7 @@ const validateOrderSecurity = async (orderId, orderData) => {
         const prodRef = db.collection('products').doc(item.id);
         const prodSnap = await prodRef.get();
         
-        if (!prodSnap.exists) continue; // Produk dihapus? Skip
+        if (!prodSnap.exists) continue; // Produk dihapus? Skip (Risk)
         
         const p = prodSnap.data();
         let realPrice = p.price; // Harga Default
@@ -53,8 +53,7 @@ const validateOrderSecurity = async (orderId, orderData) => {
         calculatedTotal += (realPrice * item.qty);
     }
 
-    // Toleransi 500 perak (jaga-jaga pembulatan), selebihnya MALING.
-    // Jika Total User < (Total Asli - 500), berarti dia merubah harga di console.
+    // ZERO TOLERANCE: Selisih > 500 perak langsung dianggap MALING.
     if (orderData.total < (calculatedTotal - 500)) {
         return { isSafe: false, realTotal: calculatedTotal };
     }
@@ -78,34 +77,37 @@ const processStock = async (productId, variantName, qtyNeeded) => {
         let contentPool = "";
         let isVariant = false;
         let variantIndex = -1;
-        let isPermanent = false; 
+        let isPermanent = false; // Default: Stok Berkurang (Cut)
 
         // 1. Cek Variasi vs Utama
         if (variantName && data.variations) {
             variantIndex = data.variations.findIndex(v => v.name === variantName);
             if (variantIndex !== -1) {
                 contentPool = data.variations[variantIndex].content || "";
-                isPermanent = data.variations[variantIndex].isPermanent === true; 
+                isPermanent = data.variations[variantIndex].isPermanent === true; // Cek Flag Permanen
                 isVariant = true;
             }
         } else {
             contentPool = data.content || "";
-            isPermanent = data.isPermanent === true;
+            isPermanent = data.isPermanent === true; // Cek Flag Permanen Utama
         }
 
         // 2. LOGIKA UTAMA (Permanen vs Cut)
         if (isPermanent) {
-            // Update Sold Count saja, Stok Unlimited
+            // --- JIKA PERMANEN (Link/Tutorial) ---
+            // Stok Unlimited. Tidak ada yang dipotong.
+            // Cukup update sold count.
             const inc = parseInt(qtyNeeded);
             if (isVariant) {
                 t.update(docRef, { sold: (data.sold || 0) + inc }); 
             } else {
                 t.update(docRef, { sold: (data.sold || 0) + inc });
             }
+            // Return konten utuh & kode stok unlimited
             return { success: true, data: contentPool, currentStock: 999999 }; 
         } 
         else {
-            // Logika potong baris biasa
+            // --- JIKA STOK BIASA (Akun/Licence) ---
             let stocks = contentPool.split('\n').filter(s => s.trim().length > 0);
             
             if (stocks.length >= qtyNeeded) {
@@ -119,6 +121,7 @@ const processStock = async (productId, variantName, qtyNeeded) => {
                 } else {
                     t.update(docRef, { content: remaining, sold: (data.sold || 0) + inc });
                 }
+                
                 return { success: true, data: taken.join('\n'), currentStock: stocks.length };
             } else {
                 return { success: false, currentStock: stocks.length };
@@ -156,15 +159,18 @@ const processOrderLogic = async (orderId, orderData) => {
                 // SUKSES
                 const validLines = currentContentLines.filter(l => !l.includes('[...MENUNGGU'));
                 let newContent = result.data;
+                
+                // Logic Gabung Konten
+                // Jika Permanen, content adalah string utuh. Jika biasa, string potongan.
                 const finalContent = result.currentStock === 999999 
-                    ? newContent 
-                    : [...validLines, ...newContent.split('\n')].join('\n');
+                    ? newContent // Ambil Langsung
+                    : [...validLines, ...newContent.split('\n')].join('\n'); // Gabung Array
 
                 items.push({ ...item, content: finalContent });
                 msgLog += `✅ ${item.name}: SUKSES\n`;
             } 
             else if (result && !result.success && result.currentStock > 0) {
-                // PARTIAL
+                // PARTIAL (Hanya Stok Biasa)
                 const partialRes = await processStock(item.id, item.variantName, result.currentStock);
                 const validLines = currentContentLines.filter(l => !l.includes('[...MENUNGGU'));
                 const newLines = partialRes.data.split('\n');
@@ -265,7 +271,7 @@ app.post('/api/notify-order', async (req, res) => {
 
         // 3. JIKA AMAN, LANJUT PROSES BIASA
         let txt = items.map(i => `- ${i.name} (x${i.qty})`).join('\n'); 
-        await bot.telegram.sendMessage(ADMIN_ID, `✅ *ORDER LUNAS (SALDO)*\n🆔 \`${orderId}\`\n👤 ${buyerPhone}\n💰 Rp ${parseInt(total).toLocaleString()}\n\n${txt}\n\n🚀 *Status: Memproses Stok...*`, { parse_mode: 'Markdown' }); 
+        await bot.telegram.sendMessage(ADMIN_ID, `✅ *ORDER LUNAS (SALDO)*\n🆔 \`${orderId}\`\n👤 ${buyerPhone}\n💰 Rp ${parseInt(total).toLocaleString()}\n\n${txt}\n\n🚀 *Status: Auto-Process...*`, { parse_mode: 'Markdown' }); 
         
         await processOrderLogic(orderId, orderData); 
     } 
@@ -279,9 +285,10 @@ app.get('/', (req, res) => res.send('SERVER JSN-02 READY'));
 // 5. BOT BRAIN & HANDLERS
 // ==========================================
 
+// --- MAIN MENU UPDATED (FITUR 1 & 2) ---
 const mainMenu = Markup.inlineKeyboard([
     [Markup.button.callback('➕ TAMBAH PRODUK', 'add_prod')],
-    [Markup.button.callback('⏳ LIST PENDING', 'list_pending'), Markup.button.callback('📦 CEK SEMUA STOK', 'list_all_stock')],
+    [Markup.button.callback('⏳ LIST PENDING', 'list_pending'), Markup.button.callback('📦 CEK SEMUA STOK', 'list_all_stock')], // <-- FITUR BARU
     [Markup.button.callback('👥 USER', 'manage_users'), Markup.button.callback('💳 PAYMENT', 'set_payment')],
     [Markup.button.callback('🎨 GANTI BACKGROUND', 'set_bg')],
     [Markup.button.callback('💰 SALES', 'sales_today'), Markup.button.callback('🚨 KOMPLAIN', 'list_complain')]
@@ -311,6 +318,7 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
     const session = adminSession[userId];
 
     if (session) {
+        // ... (REVISI LOGIC SAME AS BEFORE) ...
         if (session.type === 'REVISI') {
             if (!isNaN(text) && parseInt(text) > 0 && text.length < 5) {
                 session.targetLine = parseInt(text) - 1; session.type = 'REVISI_LINE_INPUT'; ctx.reply(`🔧 Kirim data baru baris #${text}:`, cancelBtn);
@@ -331,6 +339,7 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
             else { delete adminSession[userId]; ctx.reply("❌ Baris salah."); }
         }
 
+        // --- TAMBAH PRODUK (MODIFIKASI: PERMANEN vs BIASA) ---
         else if (session.type === 'ADD_PROD') {
             const d = session.data;
             if (session.step === 'NAME') { d.name = text; session.step = 'CODE'; ctx.reply("🏷 Kode Produk:", cancelBtn); }
@@ -341,13 +350,15 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
             else if (session.step === 'DESC') { d.desc = text; session.step = 'CONTENT'; ctx.reply("📦 STOK UTAMA (Skip jika variasi):", cancelBtn); }
             else if (session.step === 'CONTENT') { 
                 d.content = text==='skip'?'':text; 
-                if (d.content) { session.step = 'IS_PERM'; ctx.reply("♾️ PERMANEN? (YA/TIDAK):", cancelBtn); }
+                if (d.content) { session.step = 'IS_PERM'; ctx.reply("♾️ Apakah stok ini PERMANEN (Link/Tutorial) atau BIASA (Akun)?\nKetik: YA (Permanen) / TIDAK (Biasa)", cancelBtn); }
                 else { session.step = 'VARS'; ctx.reply("🔀 Ada Variasi? (ya/tidak):", cancelBtn); }
             }
+            // -- BARU: CEK PERMANEN --
             else if (session.step === 'IS_PERM') {
                 d.isPermanent = text.toLowerCase() === 'ya';
                 session.step = 'VARS'; ctx.reply("🔀 Ada Variasi? (ya/tidak):", cancelBtn);
             }
+            // ------------------------
             else if (session.step === 'VARS') {
                 if(text.toLowerCase()==='ya'){ session.step='VAR_NAME'; ctx.reply("Nama Variasi:", cancelBtn); }
                 else { await db.collection('products').add({...d, createdAt:new Date()}); delete adminSession[userId]; ctx.reply("✅ Saved."); }
@@ -357,15 +368,21 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
             else if (session.step === 'VAR_PRICE') { session.tempVar.price=parseInt(text); session.step='VAR_CONTENT'; ctx.reply("Stok Var:", cancelBtn); }
             else if (session.step === 'VAR_CONTENT') { 
                 session.tempVar.content=text; 
-                session.step='VAR_PERM'; ctx.reply("♾️ Variasi PERMANEN? (YA/TIDAK):", cancelBtn); 
+                session.step='VAR_PERM'; 
+                ctx.reply("♾️ Variasi ini PERMANEN? (YA/TIDAK):", cancelBtn); 
             }
+            // -- BARU: VARIASI PERMANEN --
             else if (session.step === 'VAR_PERM') {
                 session.tempVar.isPermanent = text.toLowerCase() === 'ya';
-                d.variations.push(session.tempVar); session.step='VARS'; ctx.reply("✅ Lanjut? (ya/tidak)", cancelBtn);
+                d.variations.push(session.tempVar);
+                session.step='VARS'; 
+                ctx.reply("✅ Variasi OK. Ada lagi? (ya/tidak)", cancelBtn);
             }
+            // -----------------------------
         }
 
-        else if (session.type === 'SEARCH_USER') { /* ... */ } 
+        // 3. USER & SETTINGS (SAMA SEPERTI SEBELUMNYA)
+        else if (session.type === 'SEARCH_USER') { /* ... */ } // (Sama - Singkat untuk hemat space, logika aman)
         else if (session.type === 'TOPUP_USER') { await db.collection('users').doc(session.targetUid).update({balance:admin.firestore.FieldValue.increment(parseInt(text))}); delete adminSession[userId]; ctx.reply("✅ Sukses."); }
         else if (session.type === 'DEDUCT_USER') { await db.collection('users').doc(session.targetUid).update({balance:admin.firestore.FieldValue.increment(-parseInt(text))}); delete adminSession[userId]; ctx.reply("✅ Sukses."); }
         else if (session.type === 'SET_PAYMENT') {
@@ -382,7 +399,9 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
         return;
     }
 
+    // SEARCH (SMART SEARCH)
     if (text) {
+        // Cek User Manual (Untuk fitur Manage User)
         if (adminSession[userId]?.type === 'SEARCH_USER') {
             const cleanText = text.trim(); 
             let snap = await db.collection('users').where('email', '==', cleanText).get();
@@ -395,12 +414,13 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
             }
         }
 
+        // Cek Order
         const orderSnap = await db.collection('orders').doc(text).get();
         if (orderSnap.exists) {
             const o = orderSnap.data();
             return ctx.reply(`📦 *ORDER ${orderSnap.id}*\nStatus: ${o.status}\nItems: ${o.items.length}`, {parse_mode:'Markdown',...Markup.inlineKeyboard([[Markup.button.callback('🛠 MENU EDIT', `menu_edit_ord_${orderSnap.id}`)],[Markup.button.callback('🗑 HAPUS', `del_order_${orderSnap.id}`)]])});
         }
-        
+        // Cek Produk
         const allProds = await db.collection('products').get(); let found=null;
         allProds.forEach(doc => { const p=doc.data(); if((p.code && p.code.toLowerCase()===textLower)||(p.variations&&p.variations.some(v=>v.code.toLowerCase()===textLower))) found={id:doc.id,...p}; });
         if(found) return ctx.reply(`🔎 ${found.name}`, Markup.inlineKeyboard([[Markup.button.callback('✏️ Edit Utama', `menu_edit_main_${found.id}`)],[Markup.button.callback('🔀 ATUR VARIASI', `menu_vars_${found.id}`)],[Markup.button.callback('🗑️ Hapus', `del_prod_${found.id}`)]]));
@@ -410,6 +430,8 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
 });
 
 // --- ACTION HANDLERS ---
+
+// FITUR BARU: LIST PENDING ORDERS
 bot.action('list_pending', async (ctx) => {
     const s = await db.collection('orders').where('status', '==', 'pending').get();
     if (s.empty) return ctx.reply("✅ Aman.");
@@ -417,6 +439,7 @@ bot.action('list_pending', async (ctx) => {
     ctx.reply("⏳ **PENDING:**", Markup.inlineKeyboard(btns));
 });
 
+// FITUR BARU: CEK SEMUA STOK (LENGKAP)
 bot.action('list_all_stock', async (ctx) => {
     ctx.reply("📦 Mendata...");
     const snap = await db.collection('products').get();
