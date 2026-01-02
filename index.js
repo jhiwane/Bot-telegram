@@ -28,7 +28,7 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 const cancelBtn = Markup.inlineKeyboard([Markup.button.callback('❌ BATAL', 'cancel_action')]);
 
 // ==========================================
-// 2. LOGIKA STOK & ORDER (CORE BRAIN)
+// 2. LOGIKA STOK & ORDER
 // ==========================================
 
 const processStock = async (productId, variantName, qtyNeeded) => {
@@ -105,8 +105,10 @@ const processOrderLogic = async (orderId, orderData) => {
 app.post('/api/confirm-manual', async (req, res) => {
     const { orderId, buyerPhone, total, items } = req.body;
     let txt = items.map(i => `- ${i.name} (x${i.qty})`).join('\n');
-    bot.telegram.sendMessage(ADMIN_ID, `🔔 *ORDER MASUK*\n🆔 \`${orderId}\`\n👤 ${buyerPhone}\n💰 Rp ${parseInt(total).toLocaleString()}\n\n${txt}`, Markup.inlineKeyboard([[Markup.button.callback('⚡ PROSES', `acc_${orderId}`), Markup.button.callback('❌ TOLAK', `tolak_${orderId}`)]]));
-    res.json({ status: 'ok' });
+    try {
+        await bot.telegram.sendMessage(ADMIN_ID, `🔔 *ORDER MASUK*\n🆔 \`${orderId}\`\n👤 ${buyerPhone}\n💰 Rp ${parseInt(total).toLocaleString()}\n\n${txt}`, Markup.inlineKeyboard([[Markup.button.callback('⚡ PROSES', `acc_${orderId}`), Markup.button.callback('❌ TOLAK', `tolak_${orderId}`)]]));
+        res.json({ status: 'ok' });
+    } catch (e) { console.error(e); res.status(500).json({error:e.message}); }
 });
 
 app.post('/api/complain', async (req, res) => {
@@ -119,222 +121,253 @@ app.post('/api/complain', async (req, res) => {
 app.get('/', (req, res) => res.send('SERVER JSN-02 READY'));
 
 // ==========================================
-// 4. BOT BRAIN (PANEL ADMIN SUPER LENGKAP)
+// 4. BOT BRAIN (PANEL ADMIN COMPLETE)
 // ==========================================
 
 const mainMenu = Markup.inlineKeyboard([
     [Markup.button.callback('➕ TAMBAH PRODUK', 'add_prod')],
     [Markup.button.callback('💳 ATUR PEMBAYARAN', 'set_payment')],
-    [Markup.button.callback('💰 LAPORAN SALES', 'sales_today'), Markup.button.callback('⏳ PENDING ORDER', 'list_pending')],
-    [Markup.button.callback('🚨 DAFTAR KOMPLAIN', 'list_complain')]
+    [Markup.button.callback('💰 SALES REPORT', 'sales_today'), Markup.button.callback('🚨 KOMPLAIN', 'list_complain')]
 ]);
 
-bot.command('admin', (ctx) => ctx.reply("🛠 *PANEL ADMIN JSN-02*\nKetik Kode Produk atau ID Order untuk mencarinya.", mainMenu));
+bot.command('admin', (ctx) => ctx.reply("🛠 *PANEL ADMIN JSN-02*\nKetik Kode Produk (Utama/Variasi) atau ID Order untuk mencari.", mainMenu));
 
-// --- LISTENER TEKS (INPUT WIZARD & SEARCH) ---
+// --- LISTENER TEKS (SEARCH & WIZARD) ---
 bot.on('text', async (ctx, next) => {
     if (String(ctx.from.id) !== ADMIN_ID) return next();
     const text = ctx.message.text.trim();
     const userId = ctx.from.id;
     const session = adminSession[userId];
 
-    // A. WIZARD SESSION (INPUT BERTAHAP)
+    // A. MODE WIZARD / EDIT
     if (session) {
-        // 1. TAMBAH PRODUK LENGKAP
+        // 1. TAMBAH PRODUK
         if (session.type === 'ADD_PROD') {
             const d = session.data;
             if (session.step === 'NAME') { d.name = text; session.step = 'CODE'; ctx.reply("🏷 Kode Produk Utama:", cancelBtn); }
-            else if (session.step === 'CODE') { d.code = text; session.step = 'PRICE'; ctx.reply("💰 Harga Utama:", cancelBtn); }
+            else if (session.step === 'CODE') { d.code = text; session.step = 'PRICE'; ctx.reply("💰 Harga Utama (Angka):", cancelBtn); }
             else if (session.step === 'PRICE') { d.price = parseInt(text); session.step = 'IMG'; ctx.reply("🖼 URL Gambar:", cancelBtn); }
             else if (session.step === 'IMG') { d.image = text; session.step = 'STATS'; ctx.reply("📊 Fake Sold & View (cth: 100 5000):", cancelBtn); }
-            else if (session.step === 'STATS') { 
-                const [s, v] = text.split(' '); d.sold = parseInt(s)||0; d.view = parseInt(v)||0; 
-                session.step = 'DESC'; ctx.reply("📝 Deskripsi Produk:", cancelBtn); 
-            }
+            else if (session.step === 'STATS') { const [s, v] = text.split(' '); d.sold = parseInt(s)||0; d.view = parseInt(v)||0; session.step = 'DESC'; ctx.reply("📝 Deskripsi:", cancelBtn); }
             else if (session.step === 'DESC') { d.desc = text; session.step = 'CONTENT'; ctx.reply("📦 Stok Utama (Skip jika cuma variasi):", cancelBtn); }
             else if (session.step === 'CONTENT') { d.content = text==='skip'?'':text; session.step = 'VARS'; ctx.reply("🔀 Ada Variasi? (ya/tidak):", cancelBtn); }
             else if (session.step === 'VARS') {
-                if (text.toLowerCase() === 'ya') {
-                    session.step = 'VAR_NAME'; ctx.reply("🔀 Nama Variasi:", cancelBtn);
-                } else {
-                    await db.collection('products').add({...d, createdAt: new Date()});
-                    delete adminSession[userId];
-                    ctx.reply("✅ Produk Tersimpan!");
-                }
+                if (text.toLowerCase() === 'ya') { session.step = 'VAR_NAME'; ctx.reply("🔀 Nama Variasi:", cancelBtn); } 
+                else { await db.collection('products').add({...d, createdAt: new Date()}); delete adminSession[userId]; ctx.reply("✅ Produk Tersimpan!"); }
             }
-            // Loop Variasi
-            else if (session.step === 'VAR_NAME') {
-                if(!d.variations) d.variations = [];
-                session.tempVar = { name: text }; session.step = 'VAR_CODE'; ctx.reply("🏷 Kode Variasi:", cancelBtn);
-            }
-            else if (session.step === 'VAR_CODE') {
-                session.tempVar.code = text; session.step = 'VAR_PRICE'; ctx.reply("💰 Harga Variasi:", cancelBtn);
-            }
-            else if (session.step === 'VAR_PRICE') {
-                session.tempVar.price = parseInt(text); session.step = 'VAR_CONTENT'; ctx.reply("📦 Stok Variasi:", cancelBtn);
-            }
+            else if (session.step === 'VAR_NAME') { if(!d.variations) d.variations=[]; session.tempVar = { name: text }; session.step = 'VAR_CODE'; ctx.reply("🏷 Kode Variasi:", cancelBtn); }
+            else if (session.step === 'VAR_CODE') { session.tempVar.code = text; session.step = 'VAR_PRICE'; ctx.reply("💰 Harga Variasi:", cancelBtn); }
+            else if (session.step === 'VAR_PRICE') { session.tempVar.price = parseInt(text); session.step = 'VAR_CONTENT'; ctx.reply("📦 Stok Variasi:", cancelBtn); }
             else if (session.step === 'VAR_CONTENT') {
-                session.tempVar.content = text;
-                d.variations.push(session.tempVar);
-                session.step = 'VARS'; // Kembali tanya variasi lain
-                ctx.reply("✅ Variasi ditambahkan! Ada lagi? (ya/tidak)", cancelBtn);
+                session.tempVar.content = text; d.variations.push(session.tempVar);
+                session.step = 'VARS'; ctx.reply("✅ Variasi OK. Ada lagi? (ya/tidak)", cancelBtn);
             }
         }
-
-        // 2. SETTING PEMBAYARAN CERDAS
-        else if (session.type === 'SET_PAYMENT') {
-            const d = session.data;
-            if (session.step === 'BANK') { d.bankName = text; session.step = 'NO_REK'; ctx.reply("🔢 Nomor Rekening/Dana:", cancelBtn); }
-            else if (session.step === 'NO_REK') { d.noRek = text; session.step = 'ATAS_NAMA'; ctx.reply("👤 Atas Nama:", cancelBtn); }
-            else if (session.step === 'ATAS_NAMA') { d.atasNama = text; session.step = 'QRIS'; ctx.reply("🖼 URL Gambar QRIS (Ketik 'skip' jika tidak ada):", cancelBtn); }
-            else if (session.step === 'QRIS') {
-                const qris = text==='skip' ? '' : text;
-                const infoText = `🏦 ${d.bankName}\n🔢 ${d.noRek}\n👤 ${d.atasNama}`;
-                await db.collection('settings').doc('payment').set({ info: infoText, qris });
-                delete adminSession[userId];
-                ctx.reply("✅ Info Pembayaran Diupdate!");
-            }
-        }
-
-        // 3. EDIT PRODUK (SINGLE FIELD)
-        else if (session.type === 'EDIT_PROD') {
-            const { prodId, field } = session;
-            if(field==='price') await db.collection('products').doc(prodId).update({price:parseInt(text)});
-            else if(field==='name') await db.collection('products').doc(prodId).update({name:text});
-            else if(field==='code') await db.collection('products').doc(prodId).update({code:text});
-            else if(field==='content') await db.collection('products').doc(prodId).update({content:text});
+        
+        // 2. EDIT VARIASI
+        else if (session.type === 'EDIT_VAR') {
+            const { prodId, varIdx, field } = session;
+            const docRef = db.collection('products').doc(prodId);
+            const snap = await docRef.get();
+            let vars = snap.data().variations;
             
+            if (field === 'price') vars[varIdx].price = parseInt(text);
+            else if (field === 'name') vars[varIdx].name = text;
+            else if (field === 'code') vars[varIdx].code = text;
+            else if (field === 'content') vars[varIdx].content = text; // Replace stok
+
+            await docRef.update({ variations: vars });
             delete adminSession[userId];
-            ctx.reply("✅ Update Berhasil!");
+            ctx.reply(`✅ Variasi Updated!`);
         }
 
-        // 4. BALAS KOMPLAIN / REVISI
+        // 3. EDIT PRODUK UTAMA
+        else if (session.type === 'EDIT_MAIN') {
+            const { prodId, field } = session;
+            const update = {};
+            if(field === 'price' || field === 'sold' || field === 'view') update[field] = parseInt(text);
+            else update[field] = text;
+            
+            await db.collection('products').doc(prodId).update(update);
+            delete adminSession[userId];
+            ctx.reply("✅ Data Utama Updated!");
+        }
+
+        // 4. LAINNYA
+        else if (session.type === 'SET_PAYMENT') { /* ... logic payment ... */ 
+             if(session.step === 'BANK') { session.data.bank = text; session.step='NO'; ctx.reply("Nomor:", cancelBtn); }
+             else if(session.step === 'NO') { session.data.no = text; session.step='AN'; ctx.reply("Atas Nama:", cancelBtn); }
+             else if(session.step === 'AN') { session.data.an = text; session.step='QR'; ctx.reply("URL QRIS (Skip jika tdk ada):", cancelBtn); }
+             else if(session.step === 'QR') { 
+                 const q = text==='skip'?'':text;
+                 const info = `🏦 ${session.data.bank}\n🔢 ${session.data.no}\n👤 ${session.data.an}`;
+                 await db.collection('settings').doc('payment').set({info, qris:q});
+                 delete adminSession[userId]; ctx.reply("✅ Payment Updated!");
+             }
+        }
         else if (session.type === 'REPLY_COMPLAIN') {
             await db.collection('orders').doc(session.orderId).update({ adminReply: text, complainResolved: true });
             delete adminSession[userId]; ctx.reply("✅ Terkirim.");
         }
         else if (session.type === 'REVISI') {
-            const docRef = db.collection('orders').doc(session.orderId);
-            const snap = await docRef.get(); const data = snap.data();
+            const snap = await db.collection('orders').doc(session.orderId).get();
+            const data = snap.data();
             data.items[session.itemIdx].content = text;
-            await docRef.update({ items: data.items });
+            await db.collection('orders').doc(session.orderId).update({ items: data.items });
             delete adminSession[userId]; ctx.reply("✅ Revisi OK.");
             processOrderLogic(session.orderId, data);
         }
         return;
     }
 
-    // B. SMART SEARCH (PRODUK & ORDER)
-    
-    // Cek apakah ini ID Order?
-    const orderSnap = await db.collection('orders').doc(text).get();
-    if(orderSnap.exists) {
-        const o = orderSnap.data();
-        const items = o.items.map(i=>`${i.name} x${i.qty}`).join(', ');
-        ctx.reply(`📦 *ORDER ${orderSnap.id}*\nStatus: ${o.status}\nUser: ${o.buyerPhone}\nItem: ${items}\nTotal: ${o.total}`, Markup.inlineKeyboard([
-            [Markup.button.callback('🗑 HAPUS HISTORY', `del_order_${orderSnap.id}`)]
-        ]));
-        return;
+    // B. SMART SEARCH (DEEP SEARCH VARIATION)
+    // 1. Cek Kode Utama
+    let snap = await db.collection('products').where('code', '==', text).get();
+    let foundProd = null;
+
+    if (!snap.empty) {
+        foundProd = { id: snap.docs[0].id, ...snap.docs[0].data() };
+    } else {
+        // 2. Cek Kode Variasi (Manual Search - Deep Scan)
+        const allProds = await db.collection('products').get();
+        allProds.forEach(doc => {
+            const p = doc.data();
+            if (p.variations && p.variations.some(v => v.code === text)) {
+                foundProd = { id: doc.id, ...p };
+            }
+        });
     }
 
-    // Cek apakah ini Kode Produk?
-    const prodSnap = await db.collection('products').where('code', '==', text).get();
-    if (!prodSnap.empty) {
-        const doc = prodSnap.docs[0];
-        const p = doc.data();
+    if (foundProd) {
+        const p = foundProd;
         const mainStok = p.content ? p.content.split('\n').filter(x=>x.trim()).length : 0;
         
-        ctx.reply(`🔎 *${p.name}*\n🏷 ${p.code} | Rp ${p.price}\n📦 Stok Utama: ${mainStok}\n🔀 Variasi: ${p.variations?.length||0}`, {
+        ctx.reply(`🔎 *${p.name}*\n🏷 Kode Utama: ${p.code}\n💰 Rp ${p.price}\n📦 Stok Utama: ${mainStok}\n🔀 ${p.variations?.length||0} Variasi`, {
             parse_mode: 'Markdown',
             ...Markup.inlineKeyboard([
-                [Markup.button.callback('✏️ Nama', `ed_name_${doc.id}`), Markup.button.callback('✏️ Harga', `ed_price_${doc.id}`)],
-                [Markup.button.callback('✏️ Kode', `ed_code_${doc.id}`), Markup.button.callback('📦 Stok Utama', `ed_stok_${doc.id}`)],
-                [Markup.button.callback('🗑️ HAPUS PRODUK', `del_prod_${doc.id}`)]
+                [Markup.button.callback('✏️ Edit Utama', `menu_edit_main_${p.id}`)],
+                [Markup.button.callback('🔀 ATUR VARIASI', `menu_vars_${p.id}`)],
+                [Markup.button.callback('🗑️ HAPUS PRODUK', `del_prod_${p.id}`)]
             ])
         });
         return;
     }
 
-    ctx.reply("❌ Tidak ditemukan (Produk/Order).");
+    // Cek ID Order
+    const orderSnap = await db.collection('orders').doc(text).get();
+    if(orderSnap.exists) {
+        const o = orderSnap.data();
+        ctx.reply(`📦 *ORDER ${orderSnap.id}*\nStatus: ${o.status}\nTotal: ${o.total}`, Markup.inlineKeyboard([[Markup.button.callback('Hapus History', `del_order_${orderSnap.id}`)]]));
+        return;
+    }
+
+    ctx.reply("❌ Tidak ditemukan.");
 });
 
 // --- ACTION HANDLERS ---
 
-// WIZARD START
-bot.action('add_prod', (ctx) => {
-    adminSession[ctx.from.id] = { type: 'ADD_PROD', step: 'NAME', data: {} };
-    ctx.reply("➕ *WIZARD TAMBAH PRODUK*\nMasukkan Nama Produk:", cancelBtn);
-});
-
-bot.action('set_payment', (ctx) => {
-    adminSession[ctx.from.id] = { type: 'SET_PAYMENT', step: 'BANK', data: {} };
-    ctx.reply("🏦 Masukkan Nama Bank/E-Wallet (Cth: BCA / DANA):", cancelBtn);
-});
-
-// SALES REPORT (FIX LOGIC)
-bot.action('sales_today', async (ctx) => {
-    const start = new Date(); start.setHours(0,0,0,0);
-    const snap = await db.collection('orders').where('status','==','success').where('createdAt','>=',start).get();
-    
-    let totalUang = 0;
-    let totalTrx = 0;
-    let itemsSold = 0;
-
-    snap.forEach(d => {
-        const data = d.data();
-        totalUang += data.total;
-        totalTrx++;
-        data.items.forEach(i => itemsSold += i.qty);
+// 1. MENU EDIT UTAMA
+bot.action(/^menu_edit_main_(.+)$/, (ctx) => {
+    const pid = ctx.match[1];
+    ctx.editMessageText("✏️ *EDIT DATA UTAMA*", {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+            [Markup.button.callback('Nama', `ed_main_name_${pid}`), Markup.button.callback('Harga', `ed_main_price_${pid}`)],
+            [Markup.button.callback('Kode', `ed_main_code_${pid}`), Markup.button.callback('Stok', `ed_main_content_${pid}`)],
+            [Markup.button.callback('🔙 Kembali', `back_prod_${pid}`)]
+        ])
     });
-
-    ctx.reply(`💰 *LAPORAN SALES HARI INI*\n\n💵 Omset: Rp ${totalUang.toLocaleString()}\n🛒 Transaksi: ${totalTrx}\n📦 Item Terjual: ${itemsSold}`);
 });
 
-// EDIT HANDLERS
-bot.action(/^ed_name_(.+)$/, (ctx)=>{ adminSession[ctx.from.id]={type:'EDIT_PROD', prodId:ctx.match[1], field:'name'}; ctx.reply("Kirim Nama Baru:"); });
-bot.action(/^ed_price_(.+)$/, (ctx)=>{ adminSession[ctx.from.id]={type:'EDIT_PROD', prodId:ctx.match[1], field:'price'}; ctx.reply("Kirim Harga Baru:"); });
-bot.action(/^ed_code_(.+)$/, (ctx)=>{ adminSession[ctx.from.id]={type:'EDIT_PROD', prodId:ctx.match[1], field:'code'}; ctx.reply("Kirim Kode Baru:"); });
-bot.action(/^ed_stok_(.+)$/, (ctx)=>{ adminSession[ctx.from.id]={type:'EDIT_PROD', prodId:ctx.match[1], field:'content'}; ctx.reply("Kirim Stok Baru (Timpa):"); });
+bot.action(/^ed_main_(.+)_(.+)$/, (ctx) => {
+    const [_, field, pid] = ctx.match;
+    adminSession[ctx.from.id] = { type: 'EDIT_MAIN', prodId: pid, field: field };
+    ctx.reply(`Kirim nilai baru untuk *${field.toUpperCase()}*:`, cancelBtn);
+});
 
-// HAPUS
-bot.action(/^del_prod_(.+)$/, async (ctx)=>{ await db.collection('products').doc(ctx.match[1]).delete(); ctx.editMessageText("🗑️ Produk Terhapus."); });
-bot.action(/^del_order_(.+)$/, async (ctx)=>{ await db.collection('orders').doc(ctx.match[1]).delete(); ctx.editMessageText("🗑️ History Order Dihapus."); });
+// 2. MENU VARIASI (LIST)
+bot.action(/^menu_vars_(.+)$/, async (ctx) => {
+    const pid = ctx.match[1];
+    const d = await db.collection('products').doc(pid).get();
+    const vars = d.data().variations || [];
+    
+    if(vars.length === 0) return ctx.reply("Tidak ada variasi.", Markup.inlineKeyboard([[Markup.button.callback('➕ Tambah Variasi', `add_new_var_${pid}`)]]));
 
-// COMMON HANDLERS
+    const btns = vars.map((v, i) => [Markup.button.callback(`${v.name} (${v.code})`, `sel_var_${pid}_${i}`)]);
+    btns.push([Markup.button.callback('➕ Tambah Variasi', `add_new_var_${pid}`)]);
+    btns.push([Markup.button.callback('🔙 Kembali', `back_prod_${pid}`)]);
+
+    ctx.editMessageText("🔀 *PILIH VARIASI UNTUK DIEDIT:*", { parse_mode: 'Markdown', ...Markup.inlineKeyboard(btns) });
+});
+
+// 3. MENU DETAIL VARIASI (EDIT SPECIFIC)
+bot.action(/^sel_var_(.+)_(.+)$/, async (ctx) => {
+    const [_, pid, idx] = ctx.match;
+    const d = await db.collection('products').doc(pid).get();
+    const v = d.data().variations[idx];
+    const stok = v.content ? v.content.split('\n').filter(x=>x.trim()).length : 0;
+
+    ctx.editMessageText(`🔀 *VARIASI: ${v.name}*\n🏷 ${v.code}\n💰 Rp ${v.price}\n📦 Stok: ${stok}`, {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+            [Markup.button.callback('✏️ Nama', `ed_var_name_${pid}_${idx}`), Markup.button.callback('✏️ Harga', `ed_var_price_${pid}_${idx}`)],
+            [Markup.button.callback('✏️ Kode', `ed_var_code_${pid}_${idx}`), Markup.button.callback('📦 Stok', `ed_var_content_${pid}_${idx}`)],
+            [Markup.button.callback('🗑️ Hapus Variasi', `del_var_${pid}_${idx}`)],
+            [Markup.button.callback('🔙 List Variasi', `menu_vars_${pid}`)]
+        ])
+    });
+});
+
+bot.action(/^ed_var_(.+)_(.+)_(.+)$/, (ctx) => {
+    const [_, field, pid, idx] = ctx.match;
+    adminSession[ctx.from.id] = { type: 'EDIT_VAR', prodId: pid, varIdx: parseInt(idx), field: field };
+    ctx.reply(`Kirim nilai baru untuk Variasi *${field.toUpperCase()}*:`, cancelBtn);
+});
+
+// HAPUS VARIASI
+bot.action(/^del_var_(.+)_(.+)$/, async (ctx) => {
+    const [_, pid, idx] = ctx.match;
+    const docRef = db.collection('products').doc(pid);
+    const snap = await docRef.get();
+    let vars = snap.data().variations;
+    vars.splice(parseInt(idx), 1); // Hapus array item
+    await docRef.update({ variations: vars });
+    ctx.reply("🗑️ Variasi dihapus.");
+});
+
+// TAMBAH VARIASI BARU (Ke Produk Lama)
+bot.action(/^add_new_var_(.+)$/, (ctx) => {
+    // Reuse logic ADD_PROD step VARS? Agak ribet.
+    // Kita buat simple session manual saja nanti kalau butuh.
+    ctx.reply("ℹ️ Fitur tambah variasi ke produk lama belum aktif di versi ini. Silakan hapus & buat ulang produk jika ingin merombak struktur total.");
+});
+
+// UTILS
+bot.action(/^back_prod_(.+)$/, async (ctx) => {
+    // Kembali ke tampilan awal produk
+    const d = await db.collection('products').doc(ctx.match[1]).get();
+    const p = d.data();
+    ctx.editMessageText(`🔎 *${p.name}*\n🏷 ${p.code}`, Markup.inlineKeyboard([
+        [Markup.button.callback('✏️ Edit Utama', `menu_edit_main_${d.id}`)],
+        [Markup.button.callback('🔀 ATUR VARIASI', `menu_vars_${d.id}`)],
+        [Markup.button.callback('🗑️ HAPUS PRODUK', `del_prod_${d.id}`)]
+    ]));
+});
+
+// DEFAULT ACTIONS
+bot.action('add_prod', (ctx)=>{ adminSession[ctx.from.id]={type:'ADD_PROD', step:'NAME', data:{}}; ctx.reply("Nama Produk:", cancelBtn); });
+bot.action('set_payment', (ctx)=>{ adminSession[ctx.from.id]={type:'SET_PAYMENT', step:'BANK', data:{}}; ctx.reply("Nama Bank:", cancelBtn); });
+bot.action('sales_today', async (ctx)=>{ 
+    const start=new Date(); start.setHours(0,0,0,0);
+    const snap=await db.collection('orders').where('status','==','success').where('createdAt','>=',start).get();
+    let t=0, c=0; snap.forEach(d=>{t+=d.data().total;c++}); ctx.reply(`Omset: Rp ${t.toLocaleString()} (${c} Trx)`); 
+});
+bot.action('list_pending', async (ctx)=>{ const s=await db.collection('orders').where('status','==','pending').get(); if(s.empty)return ctx.reply("Aman"); const b=s.docs.map(d=>[Markup.button.callback(d.data().buyerPhone,`acc_${d.id}`)]); ctx.reply("Pending",Markup.inlineKeyboard(b)); });
+bot.action('list_complain', async (ctx)=>{ const s=await db.collection('orders').where('complain','==',true).where('complainResolved','==',false).get(); if(s.empty)return ctx.reply("Aman"); const b=s.docs.map(d=>[Markup.button.callback(d.id,`view_comp_${d.id}`)]); ctx.reply("Komplain",Markup.inlineKeyboard(b)); });
+
+bot.action(/^del_prod_(.+)$/, async (ctx)=>{ await db.collection('products').doc(ctx.match[1]).delete(); ctx.editMessageText("Dihapus."); });
 bot.action('cancel_action', (ctx)=>{ delete adminSession[ctx.from.id]; ctx.reply("Batal."); });
-bot.action('list_pending', async (ctx) => {
-    const snap = await db.collection('orders').where('status','==','pending').get();
-    if(snap.empty) return ctx.reply("Aman.");
-    const btns = snap.docs.map(d=>[Markup.button.callback(`${d.data().buyerPhone}`, `cek_${d.id}`)]);
-    ctx.reply("Pending:", Markup.inlineKeyboard(btns));
-});
-bot.action(/^cek_(.+)$/, async (ctx) => {
-    const d = await db.collection('orders').doc(ctx.match[1]).get();
-    ctx.reply(`Order ${d.id}`, Markup.inlineKeyboard([[Markup.button.callback('ACC', `acc_${d.id}`), Markup.button.callback('TOLAK', `tolak_${d.id}`)]]));
-});
-bot.action(/^acc_(.+)$/, async (ctx) => {
-    ctx.reply("Proses..."); 
-    const d = await db.collection('orders').doc(ctx.match[1]).get();
-    if(d.exists) processOrderLogic(ctx.match[1], d.data());
-});
-bot.action(/^tolak_(.+)$/, async (ctx)=>{ await db.collection('orders').doc(ctx.match[1]).update({status:'failed'}); ctx.editMessageText("Ditolak."); });
-bot.action(/^rev_(.+)_(.+)$/, (ctx)=>{ adminSession[ctx.from.id]={type:'REVISI', orderId:ctx.match[1], itemIdx:parseInt(ctx.match[2])}; ctx.reply("Isi Manual:"); });
 
-// LIST COMPLAIN
-bot.action('list_complain', async (ctx)=>{
-    const snap = await db.collection('orders').where('complain','==',true).where('complainResolved','==',false).get();
-    if(snap.empty) return ctx.reply("Aman.");
-    const btns = snap.docs.map(d=>[Markup.button.callback(`🚨 ${d.id.slice(0,5)}`, `view_comp_${d.id}`)]);
-    ctx.reply("Komplain:", Markup.inlineKeyboard(btns));
-});
-bot.action(/^view_comp_(.+)$/, async (ctx)=>{
-    const d = await db.collection('orders').doc(ctx.match[1]).get();
-    ctx.reply(`Msg: ${d.data().userComplainText}`, Markup.inlineKeyboard([[Markup.button.callback('BALAS', `reply_comp_${d.id}`), Markup.button.callback('SELESAI', `solve_${d.id}`)]]));
-});
-bot.action(/^reply_comp_(.+)$/, (ctx)=>{ adminSession[ctx.from.id]={type:'REPLY_COMPLAIN', orderId:ctx.match[1]}; ctx.reply("Balasan:"); });
-bot.action(/^solve_(.+)$/, async (ctx)=>{ await db.collection('orders').doc(ctx.match[1]).update({complainResolved:true}); ctx.editMessageText("Done."); });
-
-// START
 app.listen(PORT, () => {
     console.log(`SERVER RUNNING ${PORT}`);
     bot.telegram.deleteWebhook({drop_pending_updates:true}).then(()=>bot.launch());
