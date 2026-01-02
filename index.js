@@ -13,7 +13,7 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const ADMIN_ID = process.env.ADMIN_ID;
-const adminSession = {}; // OTAK SEMENTARA BOT
+const adminSession = {}; // Ingatan Bot
 
 // --- FIREBASE ---
 let serviceAccount;
@@ -25,12 +25,10 @@ const db = admin.firestore();
 
 // --- BOT TELEGRAM ---
 const bot = new Telegraf(process.env.BOT_TOKEN);
-
-// Tombol Batal Umum
 const cancelBtn = Markup.inlineKeyboard([Markup.button.callback('❌ BATAL', 'cancel_action')]);
 
 // ==========================================
-// 2. LOGIKA STOK & ORDER (BACKEND BRAIN)
+// 2. LOGIKA STOK & ORDER
 // ==========================================
 
 const processStock = async (productId, variantName, qtyNeeded) => {
@@ -45,7 +43,6 @@ const processStock = async (productId, variantName, qtyNeeded) => {
         let isVariant = false;
         let variantIndex = -1;
 
-        // Cek Variasi
         if (variantName && data.variations) {
             variantIndex = data.variations.findIndex(v => v.name === variantName);
             if (variantIndex !== -1) {
@@ -56,7 +53,6 @@ const processStock = async (productId, variantName, qtyNeeded) => {
             contentPool = data.content || "";
         }
 
-        // LOGIKA POTONG BARIS
         let stocks = contentPool.split('\n').filter(s => s.trim().length > 0);
         
         if (stocks.length >= qtyNeeded) {
@@ -116,14 +112,47 @@ const processOrderLogic = async (orderId, orderData) => {
 };
 
 // ==========================================
-// 3. API WEBHOOK
+// 3. API WEBHOOK (ORDER & KOMPLAIN)
 // ==========================================
+
+// A. TERIMA ORDER BARU
 app.post('/api/confirm-manual', async (req, res) => {
     const { orderId, buyerPhone, total, items } = req.body;
     let txt = items.map(i => `- ${i.name} (x${i.qty})`).join('\n');
-    bot.telegram.sendMessage(ADMIN_ID, 
-        `🔔 *ORDER MASUK*\n🆔 \`${orderId}\`\n👤 ${buyerPhone}\n💰 Rp ${parseInt(total).toLocaleString()}\n\n${txt}`, 
-        Markup.inlineKeyboard([[Markup.button.callback('⚡ PROSES', `acc_${orderId}`), Markup.button.callback('❌ TOLAK', `tolak_${orderId}`)]])
+    
+    try {
+        await bot.telegram.sendMessage(ADMIN_ID, 
+            `🔔 *ORDER MASUK*\n🆔 \`${orderId}\`\n👤 ${buyerPhone}\n💰 Rp ${parseInt(total).toLocaleString()}\n\n${txt}`, 
+            Markup.inlineKeyboard([[Markup.button.callback('⚡ PROSES', `acc_${orderId}`), Markup.button.callback('❌ TOLAK', `tolak_${orderId}`)]])
+        );
+        res.json({ status: 'ok' });
+    } catch (error) {
+        console.error("Gagal kirim notif bot:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// B. TERIMA KOMPLAIN TEKS
+app.post('/api/complain', async (req, res) => {
+    const { orderId, message } = req.body;
+    
+    // Update DB status
+    await db.collection('orders').doc(orderId).update({ 
+        complain: true, 
+        complainResolved: false,
+        userComplainText: message 
+    });
+
+    // Notif ke Admin
+    await bot.telegram.sendMessage(ADMIN_ID, 
+        `🚨 *KOMPLAIN MASUK!* 🚨\n\n🆔 Order: \`${orderId}\`\n💬 Pesan: "${message}"`, 
+        { 
+            parse_mode: 'Markdown',
+            ...Markup.inlineKeyboard([
+                [Markup.button.callback('📩 BALAS PESAN', `reply_comp_${orderId}`)],
+                [Markup.button.callback('✅ TANDAI SELESAI', `solve_${orderId}`)]
+            ])
+        }
     );
     res.json({ status: 'ok' });
 });
@@ -131,211 +160,129 @@ app.post('/api/confirm-manual', async (req, res) => {
 app.get('/', (req, res) => res.send('SERVER JSN-02 READY'));
 
 // ==========================================
-// 4. BOT LISTENER (THE BRAIN)
+// 4. BOT BRAIN (PANEL ADMIN)
 // ==========================================
 
-// --- MENU UTAMA ---
 const mainMenu = Markup.inlineKeyboard([
     [Markup.button.callback('➕ TAMBAH PRODUK', 'add_prod')],
-    [Markup.button.callback('💰 PENJUALAN HARI INI', 'sales_today'), Markup.button.callback('⏳ PENDING', 'list_pending')]
+    [Markup.button.callback('💳 ATUR PEMBAYARAN', 'set_payment')],
+    [Markup.button.callback('💰 SALES HARI INI', 'sales_today'), Markup.button.callback('🚨 KOMPLAIN', 'list_complain')]
 ]);
 
-bot.command('admin', (ctx) => ctx.reply("🛠 *PANEL ADMIN JSN-02*\nKetik Kode Produk untuk Edit/Hapus.", mainMenu));
+bot.command('admin', (ctx) => ctx.reply("🛠 *PANEL ADMIN JSN-02*", mainMenu));
 
-// --- LISTENER TEXT (WIZARD & SEARCH) ---
+// --- LISTENER TEKS (INPUT) ---
 bot.on('text', async (ctx, next) => {
     if (String(ctx.from.id) !== ADMIN_ID) return next();
     const text = ctx.message.text.trim();
     const userId = ctx.from.id;
     const session = adminSession[userId];
 
-    // A. JIKA SEDANG DALAM SESI (WIZARD)
     if (session) {
-        // 1. TAMBAH PRODUK BARU
+        // 1. TAMBAH PRODUK (WIZARD)
         if (session.type === 'ADD_PROD') {
             const d = session.data;
-            if (session.step === 'NAME') {
-                d.name = text; session.step = 'CODE';
-                ctx.reply("🏷 Masukkan *KODE PRODUK* (Unik, misal: FF100):", cancelBtn);
-            } else if (session.step === 'CODE') {
-                // Cek unik
-                const cek = await db.collection('products').where('code', '==', text).get();
-                if(!cek.empty) return ctx.reply("⛔ Kode sudah ada! Ganti kode:", cancelBtn);
-                d.code = text; session.step = 'PRICE';
-                ctx.reply("💰 Masukkan *HARGA UTAMA* (Angka):", cancelBtn);
-            } else if (session.step === 'PRICE') {
-                if(isNaN(text)) return ctx.reply("Harus Angka!");
-                d.price = parseInt(text); session.step = 'IMG';
-                ctx.reply("🖼 Masukkan *URL GAMBAR*:", cancelBtn);
-            } else if (session.step === 'IMG') {
-                d.image = text; session.step = 'STATS';
-                ctx.reply("📊 Masukkan *FAKE SOLD & VIEW* (Pisah spasi, cth: 50 1000):", cancelBtn);
-            } else if (session.step === 'STATS') {
-                const [s, v] = text.split(' ');
-                d.sold = parseInt(s)||0; d.view = parseInt(v)||0; session.step = 'DESC';
-                ctx.reply("📝 Masukkan *DESKRIPSI*:", cancelBtn);
-            } else if (session.step === 'DESC') {
-                d.desc = text; session.step = 'CONTENT';
-                ctx.reply("📦 Masukkan *STOK UTAMA* (Enter untuk baris baru).\nKetik 'skip' jika produk ini hanya variasi.", cancelBtn);
-            } else if (session.step === 'CONTENT') {
-                d.content = text.toLowerCase() === 'skip' ? '' : text; 
-                session.step = 'VARS';
-                ctx.reply("🔀 Masukkan *VARIASI* (Jika ada).\nFormat: Nama,Harga,Konten\n(Gunakan | untuk pemisah antar variasi)\n\nContoh:\n1 Minggu,20000,Akun1\nAkun2|1 Bulan,50000,AkunA\n\nKetik 'skip' jika tidak ada.", cancelBtn);
-            } else if (session.step === 'VARS') {
-                if(text.toLowerCase() !== 'skip') {
-                    // Parser Variasi
-                    d.variations = text.split('|').map(v => {
-                        const lines = v.split('\n');
-                        const [name, price, ...c] = lines[0].split(',');
-                        const content = [c.join(','), ...lines.slice(1)].join('\n').trim();
-                        return { name: name?.trim(), price: parseInt(price)||0, content };
-                    });
-                } else { d.variations = []; }
-                
-                await db.collection('products').add({...d, createdAt: new Date()});
+            if (session.step === 'NAME') { d.name = text; session.step = 'CODE'; ctx.reply("🏷 Kode Produk:", cancelBtn); }
+            else if (session.step === 'CODE') { d.code = text; session.step = 'PRICE'; ctx.reply("💰 Harga:", cancelBtn); }
+            else if (session.step === 'PRICE') { d.price = parseInt(text); session.step = 'IMG'; ctx.reply("🖼 URL Gambar:", cancelBtn); }
+            else if (session.step === 'IMG') { d.image = text; session.step = 'DESC'; ctx.reply("📝 Deskripsi:", cancelBtn); }
+            else if (session.step === 'DESC') { d.desc = text; session.step = 'CONTENT'; ctx.reply("📦 Stok Utama (Skip jika variasi):", cancelBtn); }
+            else if (session.step === 'CONTENT') { d.content = text==='skip'?'':text; session.step = 'VARS'; ctx.reply("🔀 Variasi? (Nama,Harga,Stok | ...):", cancelBtn); }
+            else if (session.step === 'VARS') {
+                if(text!=='skip') d.variations = text.split('|').map(v=>{ const l=v.split(','); return {name:l[0], price:parseInt(l[1]), content:l.slice(2).join(',')} });
+                else d.variations = [];
+                await db.collection('products').add({...d, sold:0, view:0, createdAt:new Date()});
                 delete adminSession[userId];
-                ctx.reply(`✅ *PRODUK TERSIMPAN!*\n📦 ${d.name} (${d.code})`);
+                ctx.reply("✅ Produk Tersimpan!");
             }
         }
-
-        // 2. EDIT PRODUK (SINGLE FIELD)
-        else if (session.type === 'EDIT_PROD') {
-            const { prodId, field, varName } = session;
-            const docRef = db.collection('products').doc(prodId);
-
-            if (field === 'price') {
-                await docRef.update({ price: parseInt(text) });
-                ctx.reply("✅ Harga Utama Diupdate!");
-            } else if (field === 'name') {
-                await docRef.update({ name: text });
-                ctx.reply("✅ Nama Produk Diupdate!");
-            } else if (field === 'content') {
-                // Replace Content
-                await docRef.update({ content: text });
-                ctx.reply("✅ Stok Utama Diupdate!");
-            } else if (field === 'var_content') {
-                // Update Stok Variasi Spesifik
-                const snap = await docRef.get();
-                let vars = snap.data().variations;
-                const idx = vars.findIndex(v => v.name === varName);
-                if(idx !== -1) {
-                    vars[idx].content = text; // Replace stok
-                    await docRef.update({ variations: vars });
-                    ctx.reply(`✅ Stok Variasi ${varName} Diupdate!`);
-                }
+        // 2. SETTING PEMBAYARAN
+        else if (session.type === 'SET_PAYMENT') {
+            if (session.step === 'INFO') {
+                session.data.info = text;
+                session.step = 'QRIS';
+                ctx.reply("🖼 Sekarang kirim *URL GAMBAR QRIS*:", cancelBtn);
+            } else if (session.step === 'QRIS') {
+                // Simpan ke Dokumen Khusus di Firebase
+                await db.collection('settings').doc('payment').set({
+                    info: session.data.info,
+                    qris: text
+                });
+                delete adminSession[userId];
+                ctx.reply("✅ Info Pembayaran & QRIS Diupdate!");
             }
+        }
+        // 3. BALAS KOMPLAIN
+        else if (session.type === 'REPLY_COMPLAIN') {
+            const { orderId } = session;
+            // Update DB agar muncul di Web User
+            await db.collection('orders').doc(orderId).update({
+                adminReply: text,
+                complainResolved: true // Anggap selesai jika sudah dibalas
+            });
             delete adminSession[userId];
+            ctx.reply(`✅ Balasan terkirim untuk Order ${orderId}`);
         }
-
-        // 3. REVISI ORDER
+        // 4. REVISI & EDIT
         else if (session.type === 'REVISI') {
             const { orderId, itemIdx } = session;
             const docRef = db.collection('orders').doc(orderId);
             const snap = await docRef.get();
             const data = snap.data();
-            if(data.items[itemIdx]) {
-                data.items[itemIdx].content = text;
-                await docRef.update({ items: data.items });
-                delete adminSession[userId];
-                ctx.reply("✅ Data Revisi Tersimpan!");
-                processOrderLogic(orderId, data);
-            }
+            data.items[itemIdx].content = text;
+            await docRef.update({ items: data.items });
+            delete adminSession[userId];
+            ctx.reply("✅ Revisi Tersimpan!");
+            processOrderLogic(orderId, data);
         }
         return;
     }
 
-    // B. SMART SEARCH (CAR KODE PRODUK)
+    // SMART SEARCH
     const snap = await db.collection('products').where('code', '==', text).get();
     if (!snap.empty) {
         const doc = snap.docs[0];
         const p = doc.data();
-        const stokUtama = p.content ? p.content.split('\n').filter(x=>x.trim()).length : 0;
-        
-        // Menu Edit Dinamis
-        let buttons = [
-            [Markup.button.callback('✏️ Edit Nama', `ed_name_${doc.id}`), Markup.button.callback('💰 Edit Harga', `ed_price_${doc.id}`)],
-            [Markup.button.callback(`📦 Edit Stok Utama (${stokUtama})`, `ed_stok_${doc.id}`)],
-            [Markup.button.callback('🗑️ HAPUS PRODUK INI', `del_prod_${doc.id}`)]
-        ];
-
-        // Jika ada variasi, tambah tombol edit variasi
-        if (p.variations && p.variations.length > 0) {
-            p.variations.forEach((v, idx) => {
-                const vStok = v.content ? v.content.split('\n').filter(x=>x.trim()).length : 0;
-                buttons.push([Markup.button.callback(`📦 Edit Stok: ${v.name} (${vStok})`, `ed_var_${doc.id}_${idx}`)]);
-            });
-        }
-
-        ctx.reply(`🔎 *${p.name}*\n🏷 Kode: ${p.code}\n💰 Rp ${p.price}`, {
-            parse_mode: 'Markdown',
-            ...Markup.inlineKeyboard(buttons)
-        });
+        let btns = [[Markup.button.callback('🗑️ HAPUS', `del_prod_${doc.id}`)]];
+        ctx.reply(`🔎 ${p.name}\n${p.code}`, Markup.inlineKeyboard(btns));
     }
 });
 
-// ==========================================
-// 5. ACTION HANDLERS (KLIK TOMBOL)
-// ==========================================
+// --- ACTION HANDLERS ---
 
-// --- WIZARD START ---
+bot.action('set_payment', (ctx) => {
+    adminSession[ctx.from.id] = { type: 'SET_PAYMENT', step: 'INFO', data: {} };
+    ctx.reply("💳 Kirim *INFO REKENING/DANA* (Teks yang akan muncul di web):", cancelBtn);
+});
+
+bot.action(/^reply_comp_(.+)$/, (ctx) => {
+    adminSession[ctx.from.id] = { type: 'REPLY_COMPLAIN', orderId: ctx.match[1] };
+    ctx.reply("💬 Tulis balasan pesan untuk pembeli:", cancelBtn);
+});
+
+bot.action('list_complain', async (ctx) => {
+    const snap = await db.collection('orders').where('complain', '==', true).where('complainResolved', '==', false).get();
+    if(snap.empty) return ctx.reply("✅ Aman.");
+    const btns = snap.docs.map(d => [Markup.button.callback(`🚨 ${d.id.slice(0,5)}...`, `view_comp_${d.id}`)]);
+    ctx.reply("List Komplain:", Markup.inlineKeyboard(btns));
+});
+
+bot.action(/^view_comp_(.+)$/, async (ctx) => {
+    const d = await db.collection('orders').doc(ctx.match[1]).get();
+    const data = d.data();
+    ctx.reply(`🚨 KOMPLAIN ${d.id}\n👤 ${data.buyerPhone}\n💬 "${data.userComplainText}"`, 
+        Markup.inlineKeyboard([[Markup.button.callback('📩 BALAS', `reply_comp_${d.id}`), Markup.button.callback('✅ SELESAI', `solve_${d.id}`)]])
+    );
+});
+
+bot.action(/^solve_(.+)$/, async (ctx) => {
+    await db.collection('orders').doc(ctx.match[1]).update({ complainResolved: true });
+    ctx.editMessageText("✅ Masalah Selesai.");
+});
+
 bot.action('add_prod', (ctx) => {
     adminSession[ctx.from.id] = { type: 'ADD_PROD', step: 'NAME', data: {} };
-    ctx.reply("➕ *TAMBAH PRODUK BARU*\nKirim Nama Produk:", cancelBtn);
-});
-
-// --- EDIT HANDLERS ---
-bot.action(/^ed_name_(.+)$/, (ctx) => {
-    adminSession[ctx.from.id] = { type: 'EDIT_PROD', prodId: ctx.match[1], field: 'name' };
-    ctx.reply("✏️ Kirim *NAMA BARU*:", cancelBtn);
-});
-
-bot.action(/^ed_price_(.+)$/, (ctx) => {
-    adminSession[ctx.from.id] = { type: 'EDIT_PROD', prodId: ctx.match[1], field: 'price' };
-    ctx.reply("💰 Kirim *HARGA BARU* (Angka):", cancelBtn);
-});
-
-bot.action(/^ed_stok_(.+)$/, (ctx) => {
-    adminSession[ctx.from.id] = { type: 'EDIT_PROD', prodId: ctx.match[1], field: 'content' };
-    ctx.reply("📦 Kirim *DATA STOK UTAMA BARU* (Isi ulang/Timpa semua):", cancelBtn);
-});
-
-// Edit Stok Variasi
-bot.action(/^ed_var_(.+)_(.+)$/, async (ctx) => {
-    const prodId = ctx.match[1];
-    const idx = parseInt(ctx.match[2]);
-    const doc = await db.collection('products').doc(prodId).get();
-    const varName = doc.data().variations[idx].name;
-    
-    adminSession[ctx.from.id] = { type: 'EDIT_PROD', prodId, field: 'var_content', varName };
-    ctx.reply(`📦 Kirim Stok Baru untuk variasi *${varName}*:`, cancelBtn);
-});
-
-// --- HAPUS HANDLER ---
-bot.action(/^del_prod_(.+)$/, async (ctx) => {
-    await db.collection('products').doc(ctx.match[1]).delete();
-    ctx.editMessageText("🗑️ Produk telah dihapus permanen dari Database.");
-});
-
-// --- ORDER HANDLERS ---
-bot.action('sales_today', async (ctx) => {
-    const start = new Date(); start.setHours(0,0,0,0);
-    const snap = await db.collection('orders').where('status','==','success').where('createdAt','>=',start).get();
-    let total=0, count=0;
-    snap.forEach(d=>{ total+=d.data().total; count++; });
-    ctx.reply(`💰 *SALES HARI INI*\nTotal: Rp ${total.toLocaleString()}\nTrx: ${count}`);
-});
-
-bot.action('list_pending', async (ctx) => {
-    const snap = await db.collection('orders').where('status','==','pending').get();
-    if(snap.empty) return ctx.reply("Nihil.");
-    const btns = snap.docs.map(d=>[Markup.button.callback(`${d.data().buyerPhone} - Rp ${d.data().total}`, `cek_${d.id}`)]);
-    ctx.reply("⏳ PENDING:", Markup.inlineKeyboard(btns));
-});
-
-bot.action(/^cek_(.+)$/, async (ctx) => {
-    const d = await db.collection('orders').doc(ctx.match[1]).get();
-    const i = d.data().items.map(x=>`${x.name} x${x.qty}`).join(', ');
-    ctx.reply(`Item: ${i}`, Markup.inlineKeyboard([[Markup.button.callback('PROSES', `acc_${d.id}`), Markup.button.callback('TOLAK', `tolak_${d.id}`)]]));
+    ctx.reply("➕ Nama Produk:", cancelBtn);
 });
 
 bot.action(/^acc_(.+)$/, async (ctx) => {
@@ -351,7 +298,12 @@ bot.action(/^tolak_(.+)$/, async (ctx) => {
 
 bot.action(/^rev_(.+)_(.+)$/, (ctx) => {
     adminSession[ctx.from.id] = { type: 'REVISI', orderId: ctx.match[1], itemIdx: parseInt(ctx.match[2]) };
-    ctx.reply("🔧 Kirim data manual:", cancelBtn);
+    ctx.reply("🔧 Isi Manual:", cancelBtn);
+});
+
+bot.action(/^del_prod_(.+)$/, async (ctx) => {
+    await db.collection('products').doc(ctx.match[1]).delete();
+    ctx.editMessageText("🗑️ Terhapus.");
 });
 
 bot.action('cancel_action', (ctx) => {
@@ -359,7 +311,7 @@ bot.action('cancel_action', (ctx) => {
     ctx.reply("Batal.");
 });
 
-// --- START ---
+// START
 app.listen(PORT, () => {
     console.log(`SERVER RUNNING ${PORT}`);
     bot.telegram.deleteWebhook({drop_pending_updates:true}).then(()=>bot.launch());
