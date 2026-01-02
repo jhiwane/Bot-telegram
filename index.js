@@ -72,32 +72,95 @@ const processStock = async (productId, variantName, qtyNeeded) => {
     });
 };
 
+// A. LOGIKA FULFILLMENT (PARTIAL SUPPORT)
 const processOrderLogic = async (orderId, orderData) => {
-    let items = [], needsRev = false, msgLog = "", revBtns = [];
+    let items = [], 
+        allComplete = true, // Penanda apakah semua item sukses
+        msgLog = "", 
+        revBtns = [];
 
     for (let i = 0; i < orderData.items.length; i++) {
         const item = orderData.items[i];
-        if (item.content) { items.push(item); msgLog += `✅ ${item.name}: OK\n`; continue; }
+        
+        // 1. Jika konten sudah ada (Manual/Revisi sebelumnya), skip stok
+        if (item.content) { 
+            items.push(item); 
+            msgLog += `✅ ${item.name}: OK (Manual)\n`; 
+            continue; 
+        }
 
         try {
+            // 2. Coba ambil stok otomatis
             const result = await processStock(item.id, item.variantName, item.qty);
+            
             if (result && result.success) {
+                // SUKSES PENUH (Stok Cukup)
                 items.push({ ...item, content: result.data });
-                msgLog += `✅ ${item.name}: SUKSES\n`;
-            } else {
-                items.push({ ...item, content: null });
-                needsRev = true;
-                msgLog += `⚠️ ${item.name}: STOK KURANG\n`;
+                msgLog += `✅ ${item.name}: SUKSES (${item.qty} pcs)\n`;
+            } 
+            else if (result && !result.success && result.currentStock > 0) {
+                // PARTIAL (Stok Ada Tapi Kurang)
+                // Ambil yang ada dulu
+                const partialResult = await processStock(item.id, item.variantName, result.currentStock);
+                const sisaButuh = item.qty - result.currentStock;
+                
+                // Content: Stok Ada + Placeholder Sisa
+                const contentText = partialResult.data + `\n\n[...MENUNGGU ${sisaButuh} LAGI...]`;
+                
+                items.push({ ...item, content: contentText }); // Tetap push biar user lihat yg ada
+                allComplete = false;
+                msgLog += `⚠️ ${item.name}: PARTIAL (Dapat ${result.currentStock}, Kurang ${sisaButuh})\n`;
+                
+                // Tombol Revisi Khusus Sisa
+                revBtns.push([Markup.button.callback(`🔧 ISI SISA: ${item.name}`, `rev_${orderId}_${i}`)]);
+            }
+            else {
+                // GAGAL TOTAL (Stok Kosong)
+                items.push({ ...item, content: null }); // Content null = Loading di frontend
+                allComplete = false;
+                msgLog += `❌ ${item.name}: STOK KOSONG\n`;
                 revBtns.push([Markup.button.callback(`🔧 ISI: ${item.name}`, `rev_${orderId}_${i}`)]);
             }
-        } catch (e) { items.push({ ...item, content: null }); needsRev = true; msgLog += `❌ ${item.name}: ERROR DB\n`; }
+        } catch (e) {
+            console.error(e);
+            items.push({ ...item, content: null });
+            allComplete = false;
+            msgLog += `❌ ${item.name}: ERROR DB\n`;
+        }
     }
 
-    await db.collection('orders').doc(orderId).update({ items, status: 'success', processed: true });
+    // Tentukan Status Akhir
+    const finalStatus = allComplete ? 'success' : 'success'; // Tetap 'success' agar muncul di web, tapi kontennya ada yang null/partial
+    
+    await db.collection('orders').doc(orderId).update({ items, status: finalStatus, processed: true });
 
-    if (needsRev) bot.telegram.sendMessage(ADMIN_ID, `⚠️ *REVISI ORDER ${orderId}*\n${msgLog}`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(revBtns) });
-    else bot.telegram.sendMessage(ADMIN_ID, `✅ *ORDER ${orderId} SELESAI*\n${msgLog}`);
+    if (!allComplete) {
+        bot.telegram.sendMessage(ADMIN_ID, 
+            `⚠️ *ORDER ${orderId} BUTUH REVISI (PARTIAL/KOSONG)*\n${msgLog}`, 
+            { parse_mode: 'Markdown', ...Markup.inlineKeyboard(revBtns) }
+        );
+    } else {
+        // JIKA SUKSES, BERI OPSI EDIT (Jaga-jaga ada akun expired)
+        bot.telegram.sendMessage(ADMIN_ID, 
+            `✅ *ORDER ${orderId} SELESAI*\n${msgLog}\nJika ada komplain, klik ID Order di bawah untuk edit:`,
+            Markup.inlineKeyboard([[Markup.button.callback('🛠 MENU EDIT ORDER INI', `menu_edit_ord_${orderId}`)]])
+        );
+    }
 };
+
+// B. TAMBAHKAN HANDLER BARU (MENU EDIT ORDER SUKSES)
+bot.action(/^menu_edit_ord_(.+)$/, async (ctx) => {
+    const oid = ctx.match[1];
+    const doc = await db.collection('orders').doc(oid).get();
+    if(!doc.exists) return ctx.reply("Order hilang.");
+    
+    const items = doc.data().items;
+    const btns = items.map((item, idx) => [
+        Markup.button.callback(`✏️ EDIT KONTEN: ${item.name}`, `rev_${oid}_${idx}`)
+    ]);
+    
+    ctx.reply(`🛠 *EDIT ORDER ${oid}*\nPilih item yang mau diperbaiki/diganti:`, Markup.inlineKeyboard(btns));
+});
 
 // ==========================================
 // 3. API WEBHOOK
@@ -268,12 +331,18 @@ bot.on('text', async (ctx, next) => {
 
     // B. LOGIKA PENCARIAN (Smart Search)
     try {
-        // Cek ID Order
+        // Cek ID Order (Tambahkan tombol EDIT di sini)
         const orderSnap = await db.collection('orders').doc(text).get();
         if (orderSnap.exists) {
             const o = orderSnap.data();
             const items = o.items.map(i=>`${i.name} x${i.qty}`).join(', ');
-            return ctx.reply(`📦 *ORDER ${orderSnap.id}*\nStatus: ${o.status}\nUser: ${o.buyerPhone}\nItem: ${items}\nTotal: ${o.total}`, {parse_mode:'Markdown',...Markup.inlineKeyboard([[Markup.button.callback('🗑 HAPUS', `del_order_${orderSnap.id}`)]])});
+            return ctx.reply(`📦 *ORDER ${orderSnap.id}*\nStatus: ${o.status}\nUser: ${o.buyerPhone}\nItem: ${items}\nTotal: ${o.total}`, {
+                parse_mode:'Markdown',
+                ...Markup.inlineKeyboard([
+                    [Markup.button.callback('🛠 MENU EDIT / REVISI', `menu_edit_ord_${orderSnap.id}`)], // <--- INI PENTING
+                    [Markup.button.callback('🗑 HAPUS HISTORY', `del_order_${orderSnap.id}`)]
+                ])
+            });
         }
 
         // Cek Produk (Deep Scan)
