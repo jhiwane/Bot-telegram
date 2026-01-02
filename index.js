@@ -116,17 +116,35 @@ app.post('/api/complain', async (req, res) => {
     res.json({ status: 'ok' });
 });
 
-// C. NOTIFIKASI ORDER SALDO (AUTO SUCCESS)
+// C. API ORDER SALDO (LANGSUNG PROSES SEPERTI MANUAL ACC)
 app.post('/api/notify-order', async (req, res) => {
-    const { orderId, buyerPhone, total, items, method } = req.body;
-    let txt = items.map(i => `- ${i.name} (x${i.qty})`).join('\n');
+    const { orderId } = req.body;
     
-    // Kirim Notif ke Admin (Tanpa Tombol ACC karena sudah Lunas)
-    await bot.telegram.sendMessage(ADMIN_ID, 
-        `✅ *ORDER LUNAS (SALDO)*\n🆔 \`${orderId}\`\n👤 ${buyerPhone}\n💰 Rp ${parseInt(total).toLocaleString()}\n\n${txt}\n\n🚀 *Status: Auto-Processed*`, 
-        { parse_mode: 'Markdown' }
-    );
-    res.json({ status: 'ok' });
+    try {
+        console.log(`🚀 Order Saldo Masuk: ${orderId}`);
+        
+        // 1. Ambil Data Terbaru dari Database (Biar aman)
+        const docRef = db.collection('orders').doc(orderId);
+        const docSnap = await docRef.get();
+
+        if (!docSnap.exists) {
+            return res.status(404).json({ error: "Order tidak ditemukan" });
+        }
+
+        const orderData = docSnap.data();
+
+        // 2. JALANKAN MESIN YANG SAMA DENGAN MANUAL ACC
+        // Ini kuncinya! Kita panggil fungsi sakti 'processOrderLogic'
+        // Dia akan otomatis: Cari Stok -> Potong Stok -> Update DB -> Lapor Admin (Sukses/Revisi)
+        await processOrderLogic(orderId, orderData);
+
+        res.json({ status: 'ok', message: 'Diproses mesin otomatis' });
+
+    } catch (e) {
+        console.error("Eror Auto Process:", e);
+        bot.telegram.sendMessage(ADMIN_ID, `⚠️ Gagal Auto-Process Order ${orderId}: ${e.message}`);
+        res.status(500).json({ error: e.message });
+    }
 });
 
 app.get('/', (req, res) => res.send('SERVER JSN-02 READY'));
