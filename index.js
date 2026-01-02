@@ -115,6 +115,7 @@ app.post('/api/complain', async (req, res) => {
     bot.telegram.sendMessage(ADMIN_ID, `🚨 *KOMPLAIN!* 🚨\n🆔 \`${orderId}\`\n💬 "${message}"`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('📩 BALAS', `reply_comp_${orderId}`), Markup.button.callback('✅ SELESAI', `solve_${orderId}`)]]) });
     res.json({ status: 'ok' });
 });
+
 // C. NOTIFIKASI ORDER SALDO (AUTO SUCCESS)
 app.post('/api/notify-order', async (req, res) => {
     const { orderId, buyerPhone, total, items, method } = req.body;
@@ -299,21 +300,19 @@ bot.action(/^ban_user_(.+)$/, async (ctx) => {
     ctx.editMessageText("🚫 User berhasil dihapus/ban.");
 });
 
-// B. SALES REPORT (ANTI-ERROR VERSION)
+// B. SALES REPORT (FIXED LOGIC)
 bot.action('sales_today', async (ctx) => {
     try {
         ctx.reply("⏳ Menghitung...");
         
         // Ambil waktu hari ini 00:00 (Local Server Time)
         const now = new Date();
-        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()); // Reset jam ke 00:00:00
+        const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate()); 
 
-        // QUERY SEDERHANA: Ambil 100 order terakhir yang sukses (Biar gak kena limit index)
-        // Kita filter tanggalnya pakai JavaScript saja biar akurat dan gak perlu Index Firestore yang ribet
+        // Query AMAN (Tanpa Index Kompleks)
         const snap = await db.collection('orders')
-            .where('status', '==', 'success')
             .orderBy('createdAt', 'desc')
-            .limit(100) 
+            .limit(200) // Ambil 200 transaksi terakhir untuk dicek
             .get();
 
         let totalOmset = 0;
@@ -322,14 +321,22 @@ bot.action('sales_today', async (ctx) => {
 
         snap.forEach(doc => {
             const data = doc.data();
-            // Konversi Timestamp Firestore ke Date JS
-            const orderDate = data.createdAt.toDate ? data.createdAt.toDate() : new Date(data.createdAt);
-            
-            // Cek apakah tanggalnya >= startOfDay (Hari ini)
-            if (orderDate >= startOfDay) {
-                totalOmset += data.total;
-                totalTrx += 1;
-                if(data.items) data.items.forEach(i => totalItem += i.qty);
+            // Hanya proses yang statusnya 'success'
+            if (data.status === 'success') {
+                // Konversi tanggal aman (Support Timestamp Firebase & Date JS)
+                let orderDate;
+                if (data.createdAt && typeof data.createdAt.toDate === 'function') {
+                    orderDate = data.createdAt.toDate();
+                } else {
+                    orderDate = new Date(data.createdAt);
+                }
+
+                // Cek apakah tanggalnya >= startOfDay (Hari ini)
+                if (orderDate >= startOfDay) {
+                    totalOmset += data.total;
+                    totalTrx += 1;
+                    if(data.items) data.items.forEach(i => totalItem += i.qty);
+                }
             }
         });
 
@@ -337,7 +344,7 @@ bot.action('sales_today', async (ctx) => {
 
     } catch (e) {
         console.error(e);
-        ctx.reply("⚠️ Gagal hitung sales. Pastikan format tanggal database benar.");
+        ctx.reply("⚠️ Gagal hitung sales. Error: " + e.message);
     }
 });
 
