@@ -223,26 +223,34 @@ app.get('/', (req, res) => res.send('SERVER JSN-02 READY'));
 // 4. BOT BRAIN (PANEL ADMIN)
 // ==========================================
 
-// Di Main Menu (Update tombolnya)
 const mainMenu = Markup.inlineKeyboard([
     [Markup.button.callback('➕ TAMBAH PRODUK', 'add_prod')],
-    [Markup.button.callback('👥 USER', 'manage_users'), Markup.button.callback('💳 PAYMENT', 'set_payment')],
+    [Markup.button.callback('👥 KELOLA USER', 'manage_users'), Markup.button.callback('💳 ATUR PEMBAYARAN', 'set_payment')],
     [Markup.button.callback('🎨 GANTI BACKGROUND', 'set_bg')], // <-- BARU
-    [Markup.button.callback('💰 SALES', 'sales_today'), Markup.button.callback('🚨 KOMPLAIN', 'list_complain')]
+    [Markup.button.callback('💰 LAPORAN HARI INI', 'sales_today'), Markup.button.callback('🚨 KOMPLAIN', 'list_complain')]
 ]);
-
-
 
 bot.command('admin', (ctx) => ctx.reply("🛠 *PANEL ADMIN JSN-02*\nKetik Kode Produk / ID Order / Email User.", mainMenu));
 
 // --- LISTENER TEKS (SEARCH & WIZARD) ---
-bot.on('text', async (ctx, next) => {
+// Note: Menggunakan bot.on(['text', 'photo']) untuk menangani input gambar juga
+bot.on(['text', 'photo'], async (ctx, next) => {
     if (String(ctx.from.id) !== ADMIN_ID) return next();
     
-    const text = ctx.message.text.trim();
+    // Handle text input or caption if photo
+    const text = ctx.message.text ? ctx.message.text.trim() : (ctx.message.caption ? ctx.message.caption.trim() : '');
     const textLower = text.toLowerCase();
     const userId = ctx.from.id;
     const session = adminSession[userId];
+
+    // Helper untuk mengambil URL/File ID gambar
+    const getPhoto = () => {
+        if (ctx.message.photo) {
+            // Ambil file_id resolusi terbesar
+            return ctx.message.photo[ctx.message.photo.length - 1].file_id;
+        }
+        return text; // Jika user kirim URL text
+    };
 
     // A. JIKA SEDANG DALAM SESI INPUT (WIZARD)
     if (session) {
@@ -290,8 +298,12 @@ bot.on('text', async (ctx, next) => {
             const d = session.data;
             if (session.step === 'NAME') { d.name = text; session.step = 'CODE'; ctx.reply("🏷 Kode Produk Utama:", cancelBtn); }
             else if (session.step === 'CODE') { d.code = text; session.step = 'PRICE'; ctx.reply("💰 Harga Utama (Angka):", cancelBtn); }
-            else if (session.step === 'PRICE') { d.price = parseInt(text); session.step = 'IMG'; ctx.reply("🖼 URL Gambar:", cancelBtn); }
-            else if (session.step === 'IMG') { d.image = text; session.step = 'STATS'; ctx.reply("📊 Fake Sold & View (cth: 100 5000):", cancelBtn); }
+            else if (session.step === 'PRICE') { d.price = parseInt(text); session.step = 'IMG'; ctx.reply("🖼 Kirim **GAMBAR** atau URL Gambar:", cancelBtn); }
+            else if (session.step === 'IMG') { 
+                d.image = getPhoto(); // Bisa terima file foto atau URL teks
+                session.step = 'STATS'; 
+                ctx.reply("📊 Fake Sold & View (cth: 100 5000):", cancelBtn); 
+            }
             else if (session.step === 'STATS') { const [s, v] = text.split(' '); d.sold = parseInt(s)||0; d.view = parseInt(v)||0; session.step = 'DESC'; ctx.reply("📝 Deskripsi:", cancelBtn); }
             else if (session.step === 'DESC') { d.desc = text; session.step = 'CONTENT'; ctx.reply("📦 Stok Utama (Skip jika variasi):", cancelBtn); }
             else if (session.step === 'CONTENT') { d.content = text==='skip'?'':text; session.step = 'VARS'; ctx.reply("🔀 Ada Variasi? (ya/tidak):", cancelBtn); }
@@ -331,8 +343,12 @@ bot.on('text', async (ctx, next) => {
         else if (session.type === 'SET_PAYMENT') {
             if(session.step === 'BANK') { session.data.bank=text; session.step='NO'; ctx.reply("Nomor:", cancelBtn); }
             else if(session.step === 'NO') { session.data.no=text; session.step='AN'; ctx.reply("Atas Nama:", cancelBtn); }
-            else if(session.step === 'AN') { session.data.an=text; session.step='QR'; ctx.reply("URL QRIS (skip/url):", cancelBtn); }
-            else if(session.step === 'QR') { await db.collection('settings').doc('payment').set({info:`🏦 ${session.data.bank}\n🔢 ${session.data.no}\n👤 ${session.data.an}`, qris:text==='skip'?'':text}); delete adminSession[userId]; ctx.reply("✅ Saved."); }
+            else if(session.step === 'AN') { session.data.an=text; session.step='QR'; ctx.reply("Kirim **GAMBAR QRIS** atau URL (skip/url):", cancelBtn); }
+            else if(session.step === 'QR') { 
+                const qris = getPhoto() === 'skip' ? '' : getPhoto();
+                await db.collection('settings').doc('payment').set({info:`🏦 ${session.data.bank}\n🔢 ${session.data.no}\n👤 ${session.data.an}`, qris: qris}); 
+                delete adminSession[userId]; ctx.reply("✅ Saved."); 
+            }
         }
         else if (session.type === 'EDIT_MAIN') { await db.collection('products').doc(session.prodId).update({[session.field]:(session.field.includes('price')||session.field.includes('sold')||session.field.includes('view'))?parseInt(text):text}); delete adminSession[userId]; ctx.reply("Updated."); }
         else if (session.type === 'EDIT_VAR') { const ref=db.collection('products').doc(session.prodId); const s=await ref.get(); let v=s.data().variations; v[session.varIdx][session.field]=(session.field==='price')?parseInt(text):text; await ref.update({variations:v}); delete adminSession[userId]; ctx.reply("Variasi Updated."); }
@@ -342,43 +358,47 @@ bot.on('text', async (ctx, next) => {
 
         // 5. SETTING BACKGROUND
         else if (session.type === 'SET_BG') {
-            await db.collection('settings').doc('layout').set({ backgroundUrl: text }, { merge: true });
+            await db.collection('settings').doc('layout').set({ backgroundUrl: getPhoto() }, { merge: true });
             delete adminSession[userId];
             ctx.reply("✅ Background Website Berhasil Diganti!");
         }
-    // B. LOGIKA PENCARIAN (Smart Search)
-    try {
-        // Cek ID Order
-        const orderSnap = await db.collection('orders').doc(text).get();
-        if (orderSnap.exists) {
-            const o = orderSnap.data();
-            const items = o.items.map(i=>`${i.name} x${i.qty}`).join(', ');
-            return ctx.reply(`📦 *ORDER ${orderSnap.id}*\nStatus: ${o.status}\nUser: ${o.buyerPhone}\nItem: ${items}\nTotal: ${o.total}`, {parse_mode:'Markdown',...Markup.inlineKeyboard([
-                [Markup.button.callback('🛠 MENU EDIT / REVISI', `menu_edit_ord_${orderSnap.id}`)],
-                [Markup.button.callback('🗑 HAPUS', `del_order_${orderSnap.id}`)]
-            ])});
-        }
+    }
 
-        // Cek Produk (Deep Scan)
-        const allProds = await db.collection('products').get();
-        let found = null;
-        allProds.forEach(doc => {
-            const p = doc.data();
-            if ((p.code && p.code.toLowerCase() === textLower) || (p.variations && p.variations.some(v => v.code && v.code.toLowerCase() === textLower))) found = { id: doc.id, ...p };
-        });
+    // B. LOGIKA PENCARIAN (Smart Search) - Hanya jika ada teks
+    if (text) {
+        try {
+            // Cek ID Order
+            const orderSnap = await db.collection('orders').doc(text).get();
+            if (orderSnap.exists) {
+                const o = orderSnap.data();
+                const items = o.items.map(i=>`${i.name} x${i.qty}`).join(', ');
+                return ctx.reply(`📦 *ORDER ${orderSnap.id}*\nStatus: ${o.status}\nUser: ${o.buyerPhone}\nItem: ${items}\nTotal: ${o.total}`, {parse_mode:'Markdown',...Markup.inlineKeyboard([
+                    [Markup.button.callback('🛠 MENU EDIT / REVISI', `menu_edit_ord_${orderSnap.id}`)],
+                    [Markup.button.callback('🗑 HAPUS', `del_order_${orderSnap.id}`)]
+                ])});
+            }
 
-        if (found) {
-            return ctx.reply(`🔎 *${found.name}*\n🏷 Kode: ${found.code}\n💰 Rp ${found.price}`, {
-                parse_mode: 'Markdown',
-                ...Markup.inlineKeyboard([
-                    [Markup.button.callback('✏️ Edit Utama', `menu_edit_main_${found.id}`)],
-                    [Markup.button.callback('🔀 ATUR VARIASI', `menu_vars_${found.id}`)],
-                    [Markup.button.callback('🗑️ HAPUS PRODUK', `del_prod_${found.id}`)]
-                ])
+            // Cek Produk (Deep Scan)
+            const allProds = await db.collection('products').get();
+            let found = null;
+            allProds.forEach(doc => {
+                const p = doc.data();
+                if ((p.code && p.code.toLowerCase() === textLower) || (p.variations && p.variations.some(v => v.code && v.code.toLowerCase() === textLower))) found = { id: doc.id, ...p };
             });
-        }
-        ctx.reply("❌ Tidak ditemukan.");
-    } catch (e) { ctx.reply("Eror: " + e.message); }
+
+            if (found) {
+                return ctx.reply(`🔎 *${found.name}*\n🏷 Kode: ${found.code}\n💰 Rp ${found.price}`, {
+                    parse_mode: 'Markdown',
+                    ...Markup.inlineKeyboard([
+                        [Markup.button.callback('✏️ Edit Utama', `menu_edit_main_${found.id}`)],
+                        [Markup.button.callback('🔀 ATUR VARIASI', `menu_vars_${found.id}`)],
+                        [Markup.button.callback('🗑️ HAPUS PRODUK', `del_prod_${found.id}`)]
+                    ])
+                });
+            }
+            ctx.reply("❌ Tidak ditemukan.");
+        } catch (e) { ctx.reply("Eror: " + e.message); }
+    }
 });
 
 // --- ACTION HANDLERS (FULL LIST) ---
