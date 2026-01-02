@@ -223,11 +223,15 @@ app.get('/', (req, res) => res.send('SERVER JSN-02 READY'));
 // 4. BOT BRAIN (PANEL ADMIN)
 // ==========================================
 
+// Di Main Menu (Update tombolnya)
 const mainMenu = Markup.inlineKeyboard([
     [Markup.button.callback('➕ TAMBAH PRODUK', 'add_prod')],
-    [Markup.button.callback('👥 KELOLA USER', 'manage_users'), Markup.button.callback('💳 ATUR PEMBAYARAN', 'set_payment')],
-    [Markup.button.callback('💰 LAPORAN HARI INI', 'sales_today'), Markup.button.callback('🚨 KOMPLAIN', 'list_complain')]
+    [Markup.button.callback('👥 USER', 'manage_users'), Markup.button.callback('💳 PAYMENT', 'set_payment')],
+    [Markup.button.callback('🎨 GANTI BACKGROUND', 'set_bg')], // <-- BARU
+    [Markup.button.callback('💰 SALES', 'sales_today'), Markup.button.callback('🚨 KOMPLAIN', 'list_complain')]
 ]);
+
+
 
 bot.command('admin', (ctx) => ctx.reply("🛠 *PANEL ADMIN JSN-02*\nKetik Kode Produk / ID Order / Email User.", mainMenu));
 
@@ -335,8 +339,13 @@ bot.on('text', async (ctx, next) => {
         else if (session.type === 'REPLY_COMPLAIN') { await db.collection('orders').doc(session.orderId).update({adminReply:text, complainResolved:true}); delete adminSession[userId]; ctx.reply("Terkirim."); }
         
         return;
-    }
 
+        // 5. SETTING BACKGROUND
+        else if (session.type === 'SET_BG') {
+            await db.collection('settings').doc('layout').set({ backgroundUrl: text }, { merge: true });
+            delete adminSession[userId];
+            ctx.reply("✅ Background Website Berhasil Diganti!");
+        }
     // B. LOGIKA PENCARIAN (Smart Search)
     try {
         // Cek ID Order
@@ -373,7 +382,10 @@ bot.on('text', async (ctx, next) => {
 });
 
 // --- ACTION HANDLERS (FULL LIST) ---
-
+bot.action('set_bg', (ctx) => {
+    adminSession[ctx.from.id] = { type: 'SET_BG' };
+    ctx.reply("🖼 Kirim **URL GAMBAR / GIF** untuk background website:", cancelBtn);
+});
 // User Management
 bot.action('manage_users', (ctx) => { adminSession[ctx.from.id] = { type: 'SEARCH_USER' }; ctx.reply("🔍 Kirim **EMAIL** atau **UID** User:", cancelBtn); });
 bot.action(/^topup_(.+)$/, (ctx) => { adminSession[ctx.from.id] = { type: 'TOPUP_USER', targetUid: ctx.match[1] }; ctx.reply("💵 Nominal Top Up (Angka):", cancelBtn); });
