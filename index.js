@@ -115,6 +115,18 @@ app.post('/api/complain', async (req, res) => {
     bot.telegram.sendMessage(ADMIN_ID, `🚨 *KOMPLAIN!* 🚨\n🆔 \`${orderId}\`\n💬 "${message}"`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('📩 BALAS', `reply_comp_${orderId}`), Markup.button.callback('✅ SELESAI', `solve_${orderId}`)]]) });
     res.json({ status: 'ok' });
 });
+// C. NOTIFIKASI ORDER SALDO (AUTO SUCCESS)
+app.post('/api/notify-order', async (req, res) => {
+    const { orderId, buyerPhone, total, items, method } = req.body;
+    let txt = items.map(i => `- ${i.name} (x${i.qty})`).join('\n');
+    
+    // Kirim Notif ke Admin (Tanpa Tombol ACC karena sudah Lunas)
+    await bot.telegram.sendMessage(ADMIN_ID, 
+        `✅ *ORDER LUNAS (SALDO)*\n🆔 \`${orderId}\`\n👤 ${buyerPhone}\n💰 Rp ${parseInt(total).toLocaleString()}\n\n${txt}\n\n🚀 *Status: Auto-Processed*`, 
+        { parse_mode: 'Markdown' }
+    );
+    res.json({ status: 'ok' });
+});
 
 app.get('/', (req, res) => res.send('SERVER JSN-02 READY'));
 
@@ -160,18 +172,25 @@ bot.on('text', async (ctx, next) => {
             else if (session.step === 'VAR_CONTENT') { session.tempVar.content=text; d.variations.push(session.tempVar); session.step='VARS'; ctx.reply("✅ Variasi OK. Ada lagi? (ya/tidak)", cancelBtn); }
         }
 
-        // --- MANAJEMEN USER (SEARCH LOGIC) ---
+        // --- MANAJEMEN USER (SEARCH LOGIC - FIX EMAIL) ---
         else if (session.type === 'SEARCH_USER') {
             try {
                 let foundDocs = [];
+                const cleanText = text.trim(); // Hapus spasi depan/belakang
+
+                // 1. Cari by Email (Exact Match)
+                let snap = await db.collection('users').where('email', '==', cleanText).get();
                 
-                // 1. Cari by Email
-                let snap = await db.collection('users').where('email', '==', text).get();
+                // 2. Jika tidak ketemu, coba cari by Email (Lowercase conversion - jaga2 user ngetik huruf besar)
+                if (snap.empty) {
+                     snap = await db.collection('users').where('email', '==', cleanText.toLowerCase()).get();
+                }
+
                 if (!snap.empty) foundDocs = snap.docs;
                 
-                // 2. Cari by UID (Jika email zonk)
+                // 3. Cari by UID (Jika email zonk)
                 if (foundDocs.length === 0) {
-                    const docRef = await db.collection('users').doc(text).get();
+                    const docRef = await db.collection('users').doc(cleanText).get();
                     if (docRef.exists) foundDocs = [docRef];
                 }
 
@@ -188,9 +207,9 @@ bot.on('text', async (ctx, next) => {
                             ])
                         }
                     );
-                    delete adminSession[userId]; // Selesai search, reset session
+                    delete adminSession[userId]; 
                 } else {
-                    ctx.reply("❌ User tidak ditemukan. Cek Email/UID.");
+                    ctx.reply("❌ User tidak ditemukan.\nTips: Pastikan Email atau UID benar persis.");
                 }
             } catch(e) { ctx.reply("Error: " + e.message); }
         }
