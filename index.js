@@ -234,6 +234,30 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
 
     // --- 1. JIKA SEDANG ADA SESI WIZARD (INPUT BERTAHAP) ---
     if (session) {
+        // --- 2. FITUR ADMIN: BUAT VOUCHER (Format: /voucher KODE 5000) ---
+    if (text.startsWith('/voucher ')) {
+        const parts = text.split(' ');
+        if (parts.length === 3) {
+            const code = parts[1].toUpperCase();
+            const amount = parseInt(parts[2]);
+            if (!isNaN(amount)) {
+                await db.collection('vouchers').doc(code).set({ 
+                    amount: amount, 
+                    active: true,
+                    createdAt: new Date() 
+                });
+                return ctx.reply(`🎟 *VOUCHER DIBUAT*\nKode: \`${code}\`\nDiskon: Rp ${amount.toLocaleString()}`);
+            }
+        }
+        return ctx.reply("❌ Format Salah. Ketik: `/voucher KODE NOMINAL`\nContoh: `/voucher BERKAH 5000`");
+    }
+
+    // --- 3. FITUR ADMIN: HAPUS VOUCHER (Format: /delvoucher KODE) ---
+    if (text.startsWith('/delvoucher ')) {
+        const code = text.split(' ')[1].toUpperCase();
+        await db.collection('vouchers').doc(code).delete();
+        return ctx.reply(`🗑 Voucher \`${code}\` dihapus.`);
+    }
         // ... (REVISI LOGIC) ...
         if (session.type === 'REVISI') {
             if (!isNaN(text) && parseInt(text) > 0 && text.length < 5) {
