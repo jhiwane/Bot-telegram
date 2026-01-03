@@ -194,12 +194,10 @@ const processStock = async (productId, variantName, qtyNeeded) => {
             isPermanent = true;
         }
 
-        // FIX: Pastikan sold dihitung sebagai integer (Menghindari bug string '0' + 1 = '01')
         const currentSold = parseInt(data.sold) || 0;
         const inc = parseInt(qtyNeeded);
 
         if (isPermanent) {
-            // Update Sold Count (Fix Integer)
             t.update(docRef, { sold: currentSold + inc });
             return { success: true, data: contentPool, currentStock: 999999 }; 
         } else {
@@ -288,7 +286,6 @@ const processOrderLogic = async (orderId, orderData) => {
                 });
                 msgLog += `✅ ${item.name}: AUTO SUCCESS (SMART API)\n`;
 
-                // 🔥 UPDATE SOLD KHUSUS MULTI-API (FIX BUG SOLD 0) 🔥
                 try {
                     await db.collection('products').doc(item.id).update({
                         sold: admin.firestore.FieldValue.increment(parseInt(item.qty))
@@ -321,6 +318,7 @@ const processOrderLogic = async (orderId, orderData) => {
 
         try {
             const result = await processStock(item.id, item.variantName, qtyButuh);
+            
             if (result && result.success) {
                 const validLines = currentContentLines.filter(l => !l.includes('[...MENUNGGU'));
                 let newContent = result.data;
@@ -354,26 +352,24 @@ const processOrderLogic = async (orderId, orderData) => {
     // TAHAP 4: FINALISASI & NOTIFIKASI
     // ============================================================
     
-    await db.collection('orders').doc(orderId).update({ items, status: allComplete ? 'success' : 'pending', processed: true });
+    // 🔥 PERBAIKAN: PAKSA STATUS 'success' AGAR WEB MENAMPILKAN DATA (MESKIPUN ADA YG MENUNGGU)
+    await db.collection('orders').doc(orderId).update({ items, status: 'success', processed: true });
 
     if (!allComplete) {
-        bot.telegram.sendMessage(ADMIN_ID, `⚠️ *REVISI / GAGAL AUTO-BUY ${orderId}*\n${msgLog}`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(revBtns) });
+        bot.telegram.sendMessage(ADMIN_ID, `⚠️ *PERHATIAN: ORDER ${orderId} BELUM LENGKAP*\nWeb User sudah menampilkan status "Menunggu".\n\n${msgLog}\nSegera isi manual!`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(revBtns) });
     } else {
         bot.telegram.sendMessage(ADMIN_ID, `✅ *ORDER ${orderId} SELESAI*\n${msgLog}`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('🛠 MENU EDIT', `menu_edit_ord_${orderId}`)]]) });
     }
 
-    let userMsg = allComplete ? `✅ *PESANAN SELESAI!*\nOrder: \`${orderId}\`\nSilakan cek data di web.` : `⏳ *PESANAN DIPROSES*\nOrder: \`${orderId}\`\nSedang menunggu sistem/admin.`;
-    
-    if(allComplete) {
-        userMsg = `✅ *PESANAN SELESAI!*\n🆔 Order: \`${orderId}\`\n\n`;
-        items.forEach(item => {
-            let clean = item.content.replace('MULTI_API:', '').split('#')[0];
-            if(clean.includes('|')) clean = "Sukses Dikirim System.";
-            let contentClean = clean.replace(/\n/g, '\n'); 
-            userMsg += `📦 *${item.name}*\n\`${contentClean}\`\n\n`;
-        });
-        userMsg += `_Terima kasih sudah belanja!_`;
-    }
+    let userMsg = `✅ *PESANAN SELESAI!*\n🆔 Order: \`${orderId}\`\n\n`;
+    items.forEach(item => {
+        let clean = item.content.replace('MULTI_API:', '').split('#')[0];
+        if(clean.includes('|')) clean = "Sukses Dikirim System.";
+        // Bersihkan tanda MENUNGGU agar di chat WA user tidak aneh, tapi di web tetap kelihatan
+        let contentClean = clean.replace(/\[\.\.\.MENUNGGU.*?\]/g, '_(Menunggu Admin)_').replace(/\n/g, '\n'); 
+        userMsg += `📦 *${item.name}*\n\`${contentClean}\`\n\n`;
+    });
+    userMsg += `_Terima kasih sudah belanja!_`;
 
     if (typeof notifyUser === 'function') {
         await notifyUser(orderData.buyerPhone, userMsg);
@@ -461,10 +457,8 @@ const mainMenu = Markup.inlineKeyboard([
 bot.command('admin', (ctx) => ctx.reply("🛠 *PANEL ADMIN*\nKetik 'help' untuk bantuan.\nKetik APAPUN untuk mencari.", mainMenu));
 
 bot.on(['text', 'photo', 'document'], async (ctx, next) => {
-    // 1. Cek ADMIN
     if (String(ctx.from.id) !== ADMIN_ID) return next();
     
-    // 2. Ambil teks pesan
     let text = "";
     if (ctx.message.document) {
         try { ctx.reply("📂 File diterima (Logic baca file belum aktif)."); } catch(e) { return ctx.reply("Gagal baca file."); }
@@ -478,7 +472,6 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
     const userId = ctx.from.id;
     const session = adminSession[userId];
 
-    // FITUR HELP
     if (textLower === 'help' || textLower === 'bantuan') {
         const msg = `📘 **PANDUAN ADMIN**\n\n🔹 **MENU**: Buka tombol menu\n🔹 **VOUCHER**: Buat kode diskon\n🔹 **UNBAN**: Lepas blokir user\n🔹 **CARI**: Ketik Nama Produk/Email/Order ID`;
         return ctx.reply(msg, {parse_mode: 'Markdown'});
@@ -486,19 +479,16 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
 
     if (textLower === 'menu' || textLower === 'admin') return ctx.reply("🛠 *PANEL ADMIN*", mainMenu);
 
-    // VOUCHER
     if (textLower === 'voucher') {
         adminSession[userId] = { type: 'MAKE_VOUCHER', step: 'CODE', data: {} };
         return ctx.reply("🎫 **BUAT VOUCHER**\n\nKetik KODE VOUCHER (Misal: PROMO10K):", cancelBtn);
     }
 
-    // UNBAN
     if (textLower === 'unban') {
         adminSession[userId] = { type: 'DO_UNBAN', step: 'UID' };
         return ctx.reply("🔓 **UNBAN USER**\n\nKetik UID USER:", cancelBtn);
     }
     
-    // HAPUS VOUCHER
     if (text.startsWith('/delvoucher ')) {
         const parts = text.split(' ');
         if (parts.length > 1) {
@@ -507,7 +497,6 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
         }
     }
 
-    // LOGIKA SESI
     if (session) {
         if (session.type === 'MAKE_VOUCHER') {
             if (session.step === 'CODE') {
@@ -537,6 +526,7 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
             }
         }
 
+        // --- REVISI LOGIC (PERBAIKAN: HANDLE BARIS KOSONG) ---
         else if (session.type === 'REVISI') {
             if (!isNaN(text) && parseInt(text) > 0 && text.length < 5) {
                 session.targetLine = parseInt(text) - 1; session.type = 'REVISI_LINE_INPUT'; ctx.reply(`🔧 Kirim data baris #${text}:`, cancelBtn);
@@ -546,31 +536,58 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
                     item.content = 'MULTI_API:' + text; 
                     ctx.reply("✅ Diubah menjadi Format API.");
                 } else {
-                    item.content = text; 
-                    ctx.reply("✅ Ditimpa Manual.");
+                    let ex = item.content ? item.content.split('\n') : []; 
+                    let inp = text.split('\n').filter(x=>x.trim());
+                    let fill=0; 
+                    let newC=[...ex];
+                    for(let i=0; i<newC.length; i++){ 
+                        if(newC[i].includes('[...MENUNGGU') && inp.length > 0){ 
+                            newC[i] = inp.shift(); fill++; 
+                        } 
+                    }
+                    if (newC.length === 0 || !item.content.includes('[...MENUNGGU')) {
+                        item.content = text; 
+                        ctx.reply("✅ Data Ditimpa Full.");
+                    } else {
+                        item.content = newC.join('\n'); 
+                        ctx.reply(`✅ Berhasil mengisi ${fill} slot kosong.`);
+                    }
                 }
                 await db.collection('orders').doc(session.orderId).update({ items: data.items }); delete adminSession[userId]; processOrderLogic(session.orderId, data);
             }
             return;
         }
+        else if (session.type === 'REVISI_LINE_INPUT') {
+            const d = await db.collection('orders').doc(session.orderId).get(); const data = d.data(); const item = data.items[session.itemIdx];
+            let lines = item.content ? item.content.split('\n') : [];
+            // FIX: Jika baris belum ada, expand array
+            if (session.targetLine >= lines.length) { 
+                lines[session.targetLine] = text; 
+            } else { 
+                lines[session.targetLine] = text; 
+            }
+            item.content = lines.join('\n'); 
+            await db.collection('orders').doc(session.orderId).update({items: data.items}); 
+            delete adminSession[userId]; 
+            ctx.reply("✅ Baris Diupdate."); 
+            return;
+        }
 
-        // ===============================================
-        // 🔥 UPDATE: TAMBAH PRODUK (VARIASI + LOOPING API)
-        // ===============================================
         else if (session.type === 'ADD_PROD') {
             const d = session.data;
             if (session.step === 'NAME') { d.name = text; session.step = 'CODE'; ctx.reply("🏷 Kode Produk:", cancelBtn); }
             else if (session.step === 'CODE') { d.code = text; session.step = 'PRICE'; ctx.reply("💰 Harga:", cancelBtn); }
-            else if (session.step === 'PRICE') { d.price = parseInt(text); session.step = 'IMG'; ctx.reply("🖼 Gambar/URL:", cancelBtn); }
+            else if (session.step === 'PRICE') { d.price = parseInt(text); session.step = 'IMG'; ctx.reply("🖼 Gambar/URL (Bisa banyak, pisah koma/enter):", cancelBtn); }
             else if (session.step === 'IMG') { 
-                d.image = ctx.message.photo ? ctx.message.photo[ctx.message.photo.length - 1].file_id : text; 
+                const rawText = ctx.message.photo ? ctx.message.photo[ctx.message.photo.length - 1].file_id : text;
+                d.images = rawText.split(/[\n,]+/).map(s => s.trim()).filter(s => s.length > 0);
+                d.image = d.images[0] || ""; 
                 d.sold = 0; d.view = 0; 
                 d.apiList = []; 
                 session.step = 'ASK_IF_API'; 
                 ctx.reply("🔗 Produk Utama pakai API? (ya/tidak)", cancelBtn); 
             }
             
-            // --- LOOPING API UTAMA ---
             else if (session.step === 'ASK_IF_API') {
                 if(text.toLowerCase() === 'ya') {
                     session.step = 'INPUT_API_DATA';
@@ -611,19 +628,17 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
             else if (session.step === 'CONTENT') { d.content = text==='skip'?'':text; if (d.content) { session.step = 'IS_PERM'; ctx.reply("♾️ PERMANEN? (YA/TIDAK):", cancelBtn); } else { session.step = 'VARS'; ctx.reply("🔀 Ada Variasi? (ya/tidak):", cancelBtn); } }
             else if (session.step === 'IS_PERM') { d.isPermanent = text.toLowerCase() === 'ya'; session.step = 'VARS'; ctx.reply("🔀 Ada Variasi? (ya/tidak):", cancelBtn); }
             
-            // --- LOGIKA VARIASI ---
             else if (session.step === 'VARS') {
                 if(text.toLowerCase()==='ya'){ session.step='VAR_NAME'; ctx.reply("Nama Variasi:", cancelBtn); }
                 else { await db.collection('products').add({...d, createdAt:new Date()}); delete adminSession[userId]; ctx.reply("✅ Saved."); }
             }
             else if (session.step === 'VAR_NAME') { 
                 if(!d.variations) d.variations=[]; 
-                session.tempVar={ name:text, apiList: [] }; // Siapkan apiList untuk variasi
+                session.tempVar={ name:text, apiList: [] }; 
                 session.step='VAR_CODE'; ctx.reply("Kode Var:", cancelBtn); 
             }
             else if (session.step === 'VAR_CODE') { session.tempVar.code=text; session.step='VAR_PRICE'; ctx.reply("Harga Var:", cancelBtn); }
             
-            // --- LOOPING API VARIASI (BARU) ---
             else if (session.step === 'VAR_PRICE') { 
                 session.tempVar.price=parseInt(text); 
                 session.step='VAR_ASK_API'; 
@@ -634,17 +649,13 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
                     session.step = 'VAR_INPUT_API';
                     ctx.reply("📝 Format: `URL|KODE|MODAL`", cancelBtn);
                 } else {
-                    // Jika user bilang TIDAK
                     if (session.tempVar.apiList.length > 0) {
-                        // Simpan API List ke Content
                         session.tempVar.content = 'MULTI_API:' + session.tempVar.apiList.join('#');
                         session.tempVar.isPermanent = true;
-                        // Push ke Array Variasi Utama
                         d.variations.push(session.tempVar);
                         session.step = 'VARS';
                         ctx.reply("✅ Variasi API Saved. Lanjut variasi lain? (ya/tidak)", cancelBtn);
                     } else {
-                        // Lanjut Manual
                         session.step = 'VAR_CONTENT'; 
                         ctx.reply("📦 Stok Manual Variasi:", cancelBtn);
                     }
@@ -672,7 +683,6 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
             return;
         }
         
-        // (Sisa fitur saldo & edit tetap sama)
         else if (session.type === 'TOPUP_USER') { 
             const amount = parseInt(text);
             await db.collection('users').doc(session.targetUid).update({balance:admin.firestore.FieldValue.increment(amount)}); 
@@ -687,8 +697,23 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
             else if(session.step === 'QR') { await db.collection('settings').doc('payment').set({info:`🏦 ${session.data.bank}\n🔢 ${session.data.no}\n👤 ${session.data.an}`, qris: text==='skip'?'':text}); delete adminSession[userId]; ctx.reply("✅ Saved."); }
             return;
         }
-        else if (session.type === 'SET_BG') { await db.collection('settings').doc('layout').set({ backgroundUrl: ctx.message.photo ? ctx.message.photo[ctx.message.photo.length - 1].file_id : text }, { merge: true }); delete adminSession[userId]; ctx.reply("✅ Background OK."); return; }
-        else if (session.type === 'EDIT_MAIN') { await db.collection('products').doc(session.prodId).update({[session.field]:(session.field.includes('price')||session.field.includes('sold'))?parseInt(text):text}); delete adminSession[userId]; ctx.reply("Updated."); return; }
+        
+        else if (session.type === 'SET_BG') { 
+            const raw = ctx.message.photo ? ctx.message.photo[ctx.message.photo.length - 1].file_id : text;
+            const urls = raw.split(/[\n,]+/).map(u=>u.trim()).filter(u=>u);
+            await db.collection('settings').doc('layout').set({ backgroundUrls: urls }, { merge: true }); 
+            delete adminSession[userId]; ctx.reply(`✅ Background Diupdate (${urls.length} gambar).`); return; 
+        }
+        
+        else if (session.type === 'EDIT_MAIN') { 
+            if (session.field === 'images') {
+                const urls = text.split(/[\n,]+/).map(u=>u.trim()).filter(u=>u);
+                await db.collection('products').doc(session.prodId).update({ images: urls, image: urls[0] || "" });
+            } else {
+                await db.collection('products').doc(session.prodId).update({[session.field]:(session.field.includes('price')||session.field.includes('sold'))?parseInt(text):text}); 
+            }
+            delete adminSession[userId]; ctx.reply("Updated."); return; 
+        }
         else if (session.type === 'EDIT_VAR') { const ref=db.collection('products').doc(session.prodId); const s=await ref.get(); let v=s.data().variations; v[session.varIdx][session.field]=(session.field==='price')?parseInt(text):text; await ref.update({variations:v}); delete adminSession[userId]; ctx.reply("Updated."); return; }
         else if (session.type === 'REPLY_COMPLAIN') { 
             await db.collection('orders').doc(session.orderId).update({adminReply:text, complainResolved:true}); 
@@ -698,7 +723,6 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
         }
     }
 
-    // SEARCH
     if (text) {
         ctx.reply("🔍 Sedang mencari...");
         try {
@@ -774,7 +798,7 @@ bot.action('list_all_stock', async (ctx) => {
     if (msg.length > 4000) { const chunks = msg.match(/.{1,4000}/g); for (const c of chunks) await ctx.reply(c, {parse_mode:'Markdown'}); } 
     else ctx.reply(msg, {parse_mode:'Markdown'});
 });
-bot.action('set_bg', (ctx) => { adminSession[ctx.from.id] = { type: 'SET_BG' }; ctx.reply("🖼 Kirim **URL/GAMBAR**:", cancelBtn); });
+bot.action('set_bg', (ctx) => { adminSession[ctx.from.id] = { type: 'SET_BG' }; ctx.reply("🖼 Kirim **URL/GAMBAR** (Bisa banyak, pisah koma/enter):", cancelBtn); });
 bot.action('manage_users', (ctx) => { ctx.reply("🔍 Ketik langsung **EMAIL** atau **UID** di chat untuk mencari user."); });
 bot.action(/^topup_(.+)$/, (ctx)=>{ adminSession[ctx.from.id]={type:'TOPUP_USER', targetUid:ctx.match[1]}; ctx.reply("Nominal:", cancelBtn); });
 bot.action(/^deduct_(.+)$/, (ctx)=>{ adminSession[ctx.from.id]={type:'DEDUCT_USER', targetUid:ctx.match[1]}; ctx.reply("Nominal:", cancelBtn); });
@@ -786,8 +810,8 @@ bot.action(/^tolak_(.+)$/, async (ctx)=>{
     const docRef = db.collection('orders').doc(orderId);
     const snap = await docRef.get();
     await docRef.update({status:'failed'}); 
-    if(snap.exists) await notifyUser(snap.data().buyerPhone, `❌ *PESANAN DITOLAK*\nOrder: \`${orderId}\``);
-    ctx.editMessageText("Ditolak."); 
+    if(snap.exists) await notifyUser(snap.data().buyerPhone, `❌ *PESANAN DITOLAK*\nOrder: \`${orderId}\`\nMaaf, pembayaranmu tidak valid atau stok habis.`);
+    ctx.editMessageText("Ditolak & User dinotifikasi."); 
 });
 bot.action('list_complain', async (ctx)=>{ const s=await db.collection('orders').where('complain','==',true).where('complainResolved','==',false).get(); if(s.empty)return ctx.reply("Aman"); const b=s.docs.map(d=>[Markup.button.callback(d.id.slice(0,5),`view_comp_${d.id}`)]); ctx.reply("Komplain",Markup.inlineKeyboard(b)); });
 bot.action(/^view_comp_(.+)$/, async (ctx)=>{ const d = await db.collection('orders').doc(ctx.match[1]).get(); ctx.reply(`Msg: ${d.data().userComplainText}`, Markup.inlineKeyboard([[Markup.button.callback('BALAS', `reply_comp_${d.id}`), Markup.button.callback('SELESAI', `solve_${d.id}`)]])); });
@@ -799,7 +823,7 @@ bot.action(/^del_order_(.+)$/, async (ctx)=>{ await db.collection('orders').doc(
 bot.action('cancel_action', (ctx)=>{ delete adminSession[ctx.from.id]; ctx.reply("Batal."); });
 bot.action('add_prod', (ctx)=>{ adminSession[ctx.from.id]={type:'ADD_PROD', step:'NAME', data:{}}; ctx.reply("Nama Produk:", cancelBtn); });
 bot.action('set_payment', (ctx)=>{ adminSession[ctx.from.id]={type:'SET_PAYMENT', step:'BANK', data:{}}; ctx.reply("Nama Bank:", cancelBtn); });
-bot.action(/^menu_edit_main_(.+)$/, (ctx) => { const pid = ctx.match[1]; ctx.editMessageText("✏️ *EDIT UTAMA*", { parse_mode: 'Markdown', ...Markup.inlineKeyboard([ [Markup.button.callback('Nama', `ed_main_name_${pid}`), Markup.button.callback('Harga', `ed_main_price_${pid}`)], [Markup.button.callback('Kode', `ed_main_code_${pid}`), Markup.button.callback('Stok', `ed_main_content_${pid}`)], [Markup.button.callback('Fake Sold', `ed_main_sold_${pid}`), Markup.button.callback('Fake View', `ed_main_view_${pid}`)], [Markup.button.callback('🔙 Kembali', `back_prod_${pid}`)] ])}); });
+bot.action(/^menu_edit_main_(.+)$/, (ctx) => { const pid = ctx.match[1]; ctx.editMessageText("✏️ *EDIT UTAMA*", { parse_mode: 'Markdown', ...Markup.inlineKeyboard([ [Markup.button.callback('Nama', `ed_main_name_${pid}`), Markup.button.callback('Harga', `ed_main_price_${pid}`)], [Markup.button.callback('Kode', `ed_main_code_${pid}`), Markup.button.callback('Stok', `ed_main_content_${pid}`)], [Markup.button.callback('Fake Sold', `ed_main_sold_${pid}`), Markup.button.callback('Fake View', `ed_main_view_${pid}`)], [Markup.button.callback('🖼 Gambar (Multi)', `ed_main_images_${pid}`)], [Markup.button.callback('🔙 Kembali', `back_prod_${pid}`)] ])}); });
 bot.action(/^ed_main_(.+)_(.+)$/, (ctx) => { adminSession[ctx.from.id] = { type: 'EDIT_MAIN', prodId: ctx.match[2], field: ctx.match[1] }; ctx.reply(`Nilai Baru:`, cancelBtn); });
 bot.action(/^menu_vars_(.+)$/, async (ctx) => { const pid = ctx.match[1]; const d = await db.collection('products').doc(pid).get(); const vars = d.data().variations || []; const btns = vars.map((v, i) => [Markup.button.callback(`${v.name}`, `sel_var_${pid}_${i}`)]); btns.push([Markup.button.callback('🔙 Kembali', `back_prod_${pid}`)]); ctx.editMessageText("🔀 *VARIASI:*", { parse_mode: 'Markdown', ...Markup.inlineKeyboard(btns) }); });
 bot.action(/^sel_var_(.+)_(.+)$/, async (ctx) => { const [_, pid, idx] = ctx.match; const d = await db.collection('products').doc(pid).get(); const v = d.data().variations[idx]; ctx.editMessageText(`🔀 ${v.name}`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard([ [Markup.button.callback('Nama', `ed_var_name_${pid}_${idx}`), Markup.button.callback('Harga', `ed_var_price_${pid}_${idx}`)], [Markup.button.callback('Stok', `ed_var_content_${pid}_${idx}`)], [Markup.button.callback('🗑️ Hapus', `del_var_${pid}_${idx}`), Markup.button.callback('🔙 List', `menu_vars_${pid}`)] ])}); });
