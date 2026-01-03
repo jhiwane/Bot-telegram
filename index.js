@@ -2,7 +2,7 @@ const express = require('express');
 const { Telegraf, Markup } = require('telegraf');
 const admin = require('firebase-admin');
 const cors = require('cors'); 
-// const fetch = require('node-fetch'); 
+// const fetch = require('node-fetch'); // Uncomment if needed
 require('dotenv').config();
 
 // ==========================================
@@ -45,6 +45,7 @@ const validateOrderSecurity = async (orderId, orderData) => {
         }
         calculatedTotal += (realPrice * item.qty);
     }
+    // Allow slight tolerance (e.g. for rounding or manual adjustments if any)
     if (orderData.total < (calculatedTotal - 500)) return { isSafe: false, realTotal: calculatedTotal };
     return { isSafe: true };
 };
@@ -144,13 +145,11 @@ const processOrderLogic = async (orderId, orderData) => {
 // ==========================================
 // 3. API WEBHOOKS
 // ==========================================
-// A. KONFIRMASI PEMBAYARAN MANUAL (FIXED RESPONSE)
 app.post('/api/confirm-manual', async (req, res) => {
     try {
         const { orderId, buyerPhone, total, items } = req.body;
         let txt = items.map(i => `- ${i.name} (x${i.qty})`).join('\n');
         
-        // Await agar kita tahu pesan terkirim atau gagal
         await bot.telegram.sendMessage(ADMIN_ID, 
             `🔔 *ORDER MASUK (MANUAL)*\n🆔 \`${orderId}\`\n👤 ${buyerPhone}\n💰 Rp ${parseInt(total).toLocaleString()}\n\n${txt}`, 
             Markup.inlineKeyboard([
@@ -158,13 +157,9 @@ app.post('/api/confirm-manual', async (req, res) => {
                 [Markup.button.callback('❌ TOLAK', `tolak_${orderId}`)]
             ])
         );
-        
-        // Kirim sinyal SUKSES ke Frontend
         res.status(200).json({ status: 'ok' });
-        
     } catch (error) {
         console.error("Gagal kirim notif manual:", error);
-        // Kirim sinyal ERROR ke Frontend (Penting agar Frontend bisa kasih Fallback)
         res.status(500).json({ status: 'error', message: error.message });
     }
 });
@@ -209,7 +204,7 @@ const mainMenu = Markup.inlineKeyboard([
     [Markup.button.callback('💰 SALES', 'sales_today'), Markup.button.callback('🚨 KOMPLAIN', 'list_complain')]
 ]);
 
-bot.command('admin', (ctx) => ctx.reply("🛠 *PANEL ADMIN*\nKetik APAPUN (Kode Produk / Email / ID Order) untuk mencari.", mainMenu));
+bot.command('admin', (ctx) => ctx.reply("🛠 *PANEL ADMIN*\nKetik APAPUN (Kode Produk / Email / ID Order) untuk mencari.\nKetik /voucher KODE JUMLAH untuk buat voucher.", mainMenu));
 
 bot.on(['text', 'photo', 'document'], async (ctx, next) => {
     if (String(ctx.from.id) !== ADMIN_ID) return next();
@@ -232,9 +227,10 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
     const userId = ctx.from.id;
     const session = adminSession[userId];
 
-    // --- 1. JIKA SEDANG ADA SESI WIZARD (INPUT BERTAHAP) ---
-    if (session) {
-        // --- 2. FITUR ADMIN: BUAT VOUCHER (Format: /voucher KODE 5000) ---
+    // ============================================
+    // VOUCHER COMMANDS (GLOBAL ACCESS)
+    // ============================================
+    // Moved OUTSIDE session check so it works anytime
     if (text.startsWith('/voucher ')) {
         const parts = text.split(' ');
         if (parts.length === 3) {
@@ -246,19 +242,20 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
                     active: true,
                     createdAt: new Date() 
                 });
-                return ctx.reply(`🎟 *VOUCHER DIBUAT*\nKode: \`${code}\`\nDiskon: Rp ${amount.toLocaleString()}`);
+                return ctx.reply(`🎟 *VOUCHER DIBUAT*\nKode: \`${code}\`\nDiskon: Rp ${amount.toLocaleString()}`, {parse_mode:'Markdown'});
             }
         }
-        return ctx.reply("❌ Format Salah. Ketik: `/voucher KODE NOMINAL`\nContoh: `/voucher BERKAH 5000`");
+        return ctx.reply("❌ Format Salah. Ketik: `/voucher KODE NOMINAL`\nContoh: `/voucher BERKAH 5000`", {parse_mode:'Markdown'});
     }
 
-    // --- 3. FITUR ADMIN: HAPUS VOUCHER (Format: /delvoucher KODE) ---
     if (text.startsWith('/delvoucher ')) {
         const code = text.split(' ')[1].toUpperCase();
         await db.collection('vouchers').doc(code).delete();
         return ctx.reply(`🗑 Voucher \`${code}\` dihapus.`);
     }
-        // ... (REVISI LOGIC) ...
+
+    // --- 1. JIKA SEDANG ADA SESI WIZARD (INPUT BERTAHAP) ---
+    if (session) {
         if (session.type === 'REVISI') {
             if (!isNaN(text) && parseInt(text) > 0 && text.length < 5) {
                 session.targetLine = parseInt(text) - 1; session.type = 'REVISI_LINE_INPUT'; ctx.reply(`🔧 Kirim data baru baris #${text}:`, cancelBtn);
@@ -280,7 +277,6 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
             else { delete adminSession[userId]; ctx.reply("❌ Baris salah."); }
             return;
         }
-        // ... (ADD PROD LOGIC) ...
         else if (session.type === 'ADD_PROD') {
             const d = session.data;
             if (session.step === 'NAME') { d.name = text; session.step = 'CODE'; ctx.reply("🏷 Kode Produk:", cancelBtn); }
@@ -302,7 +298,6 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
             else if (session.step === 'VAR_PERM') { session.tempVar.isPermanent = text.toLowerCase() === 'ya'; d.variations.push(session.tempVar); session.step='VARS'; ctx.reply("✅ Lanjut? (ya/tidak)", cancelBtn); }
             return;
         }
-        // ... (SETTINGS & USER LOGIC) ...
         else if (session.type === 'TOPUP_USER') { await db.collection('users').doc(session.targetUid).update({balance:admin.firestore.FieldValue.increment(parseInt(text))}); delete adminSession[userId]; ctx.reply("✅ Saldo Ditambah."); return;}
         else if (session.type === 'DEDUCT_USER') { await db.collection('users').doc(session.targetUid).update({balance:admin.firestore.FieldValue.increment(-parseInt(text))}); delete adminSession[userId]; ctx.reply("✅ Saldo Dipotong."); return;}
         else if (session.type === 'SET_PAYMENT') {
@@ -319,7 +314,6 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
     }
 
     // --- 2. JIKA TIDAK ADA SESI -> UNIVERSAL SEARCH (MATA ELANG) ---
-    // Logika ini akan berjalan kapanpun Anda mengetik sesuatu di bot
     if (text) {
         ctx.reply("🔍 Sedang mencari...");
 
@@ -332,13 +326,12 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
             }
         } catch(e){}
 
-        // B. CEK PRODUK (KODE UTAMA & VARIASI)
+        // B. CEK PRODUK
         try {
             const allProds = await db.collection('products').get();
             let found = null;
             allProds.forEach(doc => { 
                 const p = doc.data(); 
-                // Cek kode utama ATAU kode variasi (case insensitive)
                 if ((p.code && p.code.toLowerCase() === textLower) || (p.variations && p.variations.some(v => v.code && v.code.toLowerCase() === textLower))) {
                     found = { id: doc.id, ...p };
                 }
@@ -355,13 +348,12 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
             }
         } catch(e){}
 
-        // C. CEK USER (EMAIL atau UID)
+        // C. CEK USER
         try {
             let foundUser = null;
             let targetUid = null;
             const cleanText = text.trim();
 
-            // Cek by Email
             let userSnap = await db.collection('users').where('email', '==', cleanText).get();
             if (userSnap.empty) userSnap = await db.collection('users').where('email', '==', cleanText.toLowerCase()).get();
             
@@ -369,7 +361,6 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
                 foundUser = userSnap.docs[0].data();
                 targetUid = userSnap.docs[0].id;
             } else {
-                // Cek by UID (Dokumen ID langsung)
                 const uidDoc = await db.collection('users').doc(cleanText).get();
                 if (uidDoc.exists) {
                     foundUser = uidDoc.data();
@@ -389,8 +380,8 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
             }
         } catch(e){}
 
-        // D. JIKA SEMUA GAGAL
-        ctx.reply("❌ Tidak ditemukan (Order/Produk/User).");
+        // D. GAGAL
+        ctx.reply("❌ Tidak ditemukan (Order/Produk/User/Voucher).\nUntuk buat voucher: /voucher KODE 5000");
     }
 });
 
