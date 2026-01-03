@@ -317,7 +317,7 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
         } else {
             return ctx.reply("❌ Data user tidak ditemukan di daftar Banned.");
         }
-    }
+    
     
     // --- FITUR ADMIN: CEK LIST BANNED ---
     if (text === '/listban') {
