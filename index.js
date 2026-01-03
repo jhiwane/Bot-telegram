@@ -395,6 +395,225 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
                 if ((p.code && p.code.toLowerCase() === textLower) || (p.variations && p.variations.some(v => v.code && v.code.toLowerCase() === textLower))) {
                     found = { id: doc.id, ...p };
                 }
+// ==========================================
+// 4. BOT BRAIN (OTAK BOT - UPDATE BARU)
+// ==========================================
+bot.on(['text', 'photo', 'document'], async (ctx, next) => {
+    // 1. Cek apakah yang chat adalah ADMIN
+    if (String(ctx.from.id) !== ADMIN_ID) return next();
+    
+    // 2. Ambil teks pesan
+    let text = "";
+    if (ctx.message.document) {
+        try {
+            const fileLink = await ctx.telegram.getFileLink(ctx.message.document.file_id);
+            // const response = await fetch(fileLink); // Aktifkan fetch jika pakai node-fetch
+            // text = await response.text();
+            ctx.reply("📂 File diterima (Logic baca file belum aktif).");
+        } catch(e) { return ctx.reply("Gagal baca file."); }
+    } else if (ctx.message.photo) {
+        text = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+    } else {
+        text = ctx.message.text ? ctx.message.text.trim() : '';
+    }
+
+    const textLower = text.toLowerCase();
+    const userId = ctx.from.id;
+    const session = adminSession[userId];
+
+    // ===============================================
+    // 🔥 BAGIAN PERINTAH "TANPA SLASH" (DIPANDU) 🔥
+    // ===============================================
+
+    // A. FITUR HELP (PANDUAN)
+    if (textLower === 'help' || textLower === 'bantuan') {
+        const msg = `
+📘 **PANDUAN ADMIN JIE STORE**
+
+Ketik kata kunci di bawah ini (Tanpa garis miring):
+
+🔹 **MENU**
+Membuka tombol menu utama.
+
+🔹 **VOUCHER**
+Membuat kode diskon baru secara bertahap.
+
+🔹 **UNBAN**
+Membebaskan user yang terblokir.
+
+🔹 **PENCARIAN (LANGSUNG KETIK)**
+- Ketik *Nama/Kode Produk* untuk edit stok.
+- Ketik *Email/UID User* untuk isi saldo.
+- Ketik *ID Order* untuk revisi/cek order.
+`;
+        return ctx.reply(msg, {parse_mode: 'Markdown'});
+    }
+
+    // B. FITUR MENU
+    if (textLower === 'menu' || textLower === 'admin') {
+        return ctx.reply("🛠 *PANEL ADMIN*", mainMenu);
+    }
+
+    // C. FITUR BUAT VOUCHER (WIZARD)
+    if (textLower === 'voucher') {
+        adminSession[userId] = { type: 'MAKE_VOUCHER', step: 'CODE', data: {} };
+        return ctx.reply("🎫 **BUAT VOUCHER BARU**\n\nSilakan ketik KODE VOUCHER yang diinginkan (Misal: PROMO10K):", cancelBtn);
+    }
+
+    // D. FITUR UNBAN USER (WIZARD)
+    if (textLower === 'unban') {
+        adminSession[userId] = { type: 'DO_UNBAN', step: 'UID' };
+        return ctx.reply("🔓 **UNBAN USER**\n\nSilakan kirim/paste **UID USER** yang mau dibebaskan:", cancelBtn);
+    }
+
+    // ===============================================
+    // 🧠 LOGIKA SESI (JAWABAN DARI PERTANYAAN BOT)
+    // ===============================================
+    if (session) {
+        // --- PROSES PEMBUATAN VOUCHER (DIPANDU) ---
+        if (session.type === 'MAKE_VOUCHER') {
+            if (session.step === 'CODE') {
+                session.data.code = text.toUpperCase().replace(/\s/g, ''); // Hapus spasi & kapital
+                session.step = 'AMOUNT';
+                return ctx.reply(`✅ Kode: **${session.data.code}**\n\nSekarang masukkan **NOMINAL DISKON** (Angka saja, misal: 5000):`, cancelBtn);
+            } 
+            else if (session.step === 'AMOUNT') {
+                const amount = parseInt(text);
+                if (isNaN(amount)) return ctx.reply("⚠️ Harap masukkan angka saja!", cancelBtn);
+                
+                // Simpan ke Database
+                await db.collection('vouchers').doc(session.data.code).set({ 
+                    amount: amount, 
+                    active: true, 
+                    createdAt: new Date() 
+                });
+                
+                delete adminSession[userId];
+                return ctx.reply(`🎉 **SUKSES!**\n\nVoucher \`${session.data.code}\` berhasil dibuat.\nNilai: Rp ${amount.toLocaleString()}`);
+            }
+        }
+
+        // --- PROSES UNBAN (DIPANDU) ---
+        else if (session.type === 'DO_UNBAN') {
+            const targetUid = text.trim();
+            const jailRef = db.collection('banned_users').doc(targetUid);
+            const jailSnap = await jailRef.get();
+            
+            if (jailSnap.exists) {
+                const savedData = jailSnap.data();
+                // Kembalikan ke table users
+                await db.collection('users').doc(targetUid).set({ 
+                    ...savedData, 
+                    restoredAt: new Date() 
+                });
+                // Hapus dari penjara
+                await jailRef.delete();
+                delete adminSession[userId];
+                return ctx.reply(`✅ **USER DI-UNBAN!**\nUID: \`${targetUid}\`\n💰 Saldo Kembali: Rp ${savedData.balance?.toLocaleString()}`);
+            } else {
+                return ctx.reply("❌ User tidak ditemukan di daftar Banned. Coba UID lain atau batalkan.", cancelBtn);
+            }
+        }
+
+        // --- LOGIKA SESI LAMA (ADD PRODUK, REVISI, DLL) ---
+        // (Jangan dihapus, ini logika lama kamu yang sudah jalan)
+        else if (session.type === 'REVISI') {
+            if (!isNaN(text) && parseInt(text) > 0 && text.length < 5) {
+                session.targetLine = parseInt(text) - 1; session.type = 'REVISI_LINE_INPUT'; ctx.reply(`🔧 Kirim data baru baris #${text}:`, cancelBtn);
+            } else {
+                const d = await db.collection('orders').doc(session.orderId).get(); const data = d.data(); const item = data.items[session.itemIdx];
+                let ex = item.content?item.content.split('\n'):[]; let inp = text.split('\n').filter(x=>x.trim());
+                let fill=0; let newC=[...ex];
+                for(let i=0;i<newC.length;i++){ if(newC[i].includes('[...MENUNGGU') && inp.length>0){newC[i]=inp.shift();fill++;} }
+                const isAllValid = !item.content.includes('[...MENUNGGU');
+                if(isAllValid) { item.content = text; ctx.reply("✅ Ditimpa Semua."); } else { item.content = newC.join('\n'); ctx.reply(`✅ Terisi ${fill} slot.`); }
+                await db.collection('orders').doc(session.orderId).update({ items: data.items }); delete adminSession[userId]; processOrderLogic(session.orderId, data);
+            }
+            return;
+        }
+        else if (session.type === 'REVISI_LINE_INPUT') {
+            const d = await db.collection('orders').doc(session.orderId).get(); const data = d.data(); const item = data.items[session.itemIdx];
+            let lines = item.content?item.content.split('\n'):[];
+            if(lines[session.targetLine]!==undefined) { lines[session.targetLine]=text; item.content=lines.join('\n'); await db.collection('orders').doc(session.orderId).update({items:data.items}); delete adminSession[userId]; ctx.reply("✅ Updated."); }
+            else { delete adminSession[userId]; ctx.reply("❌ Baris salah."); }
+            return;
+        }
+        else if (session.type === 'ADD_PROD') {
+            const d = session.data;
+            if (session.step === 'NAME') { d.name = text; session.step = 'CODE'; ctx.reply("🏷 Kode Produk:", cancelBtn); }
+            else if (session.step === 'CODE') { d.code = text; session.step = 'PRICE'; ctx.reply("💰 Harga:", cancelBtn); }
+            else if (session.step === 'PRICE') { d.price = parseInt(text); session.step = 'IMG'; ctx.reply("🖼 Gambar/URL:", cancelBtn); }
+            else if (session.step === 'IMG') { d.image = ctx.message.photo ? ctx.message.photo[ctx.message.photo.length - 1].file_id : text; session.step = 'STATS'; ctx.reply("📊 Sold View (100 500):", cancelBtn); }
+            else if (session.step === 'STATS') { const [s,v] = text.split(' '); d.sold=parseInt(s)||0; d.view=parseInt(v)||0; session.step='DESC'; ctx.reply("📝 Deskripsi:", cancelBtn); }
+            else if (session.step === 'DESC') { d.desc = text; session.step = 'CONTENT'; ctx.reply("📦 STOK UTAMA (Skip jika variasi):", cancelBtn); }
+            else if (session.step === 'CONTENT') { d.content = text==='skip'?'':text; if (d.content) { session.step = 'IS_PERM'; ctx.reply("♾️ PERMANEN? (YA/TIDAK):", cancelBtn); } else { session.step = 'VARS'; ctx.reply("🔀 Ada Variasi? (ya/tidak):", cancelBtn); } }
+            else if (session.step === 'IS_PERM') { d.isPermanent = text.toLowerCase() === 'ya'; session.step = 'VARS'; ctx.reply("🔀 Ada Variasi? (ya/tidak):", cancelBtn); }
+            else if (session.step === 'VARS') {
+                if(text.toLowerCase()==='ya'){ session.step='VAR_NAME'; ctx.reply("Nama Variasi:", cancelBtn); }
+                else { await db.collection('products').add({...d, createdAt:new Date()}); delete adminSession[userId]; ctx.reply("✅ Saved."); }
+            }
+            else if (session.step === 'VAR_NAME') { if(!d.variations)d.variations=[]; session.tempVar={name:text}; session.step='VAR_CODE'; ctx.reply("Kode Var:", cancelBtn); }
+            else if (session.step === 'VAR_CODE') { session.tempVar.code=text; session.step='VAR_PRICE'; ctx.reply("Harga Var:", cancelBtn); }
+            else if (session.step === 'VAR_PRICE') { session.tempVar.price=parseInt(text); session.step='VAR_CONTENT'; ctx.reply("Stok Var:", cancelBtn); }
+            else if (session.step === 'VAR_CONTENT') { session.tempVar.content=text; session.step='VAR_PERM'; ctx.reply("♾️ Variasi PERMANEN? (YA/TIDAK):", cancelBtn); }
+            else if (session.step === 'VAR_PERM') { session.tempVar.isPermanent = text.toLowerCase() === 'ya'; d.variations.push(session.tempVar); session.step='VARS'; ctx.reply("✅ Lanjut? (ya/tidak)", cancelBtn); }
+            return;
+        }
+        else if (session.type === 'TOPUP_USER') { 
+            const amount = parseInt(text);
+            await db.collection('users').doc(session.targetUid).update({balance:admin.firestore.FieldValue.increment(amount)}); 
+            await notifyUser(session.targetUid, `💰 *SALDO MASUK*\nJumlah: Rp ${amount.toLocaleString()}`); // Notif ke User
+            delete adminSession[userId]; 
+            ctx.reply("✅ Saldo Ditambah & Notif dikirim."); 
+            return;
+        }
+        else if (session.type === 'DEDUCT_USER') { await db.collection('users').doc(session.targetUid).update({balance:admin.firestore.FieldValue.increment(-parseInt(text))}); delete adminSession[userId]; ctx.reply("✅ Saldo Dipotong."); return;}
+        else if (session.type === 'SET_PAYMENT') {
+            if(session.step === 'BANK') { session.data.bank=text; session.step='NO'; ctx.reply("Nomor:", cancelBtn); }
+            else if(session.step === 'NO') { session.data.no=text; session.step='AN'; ctx.reply("Atas Nama:", cancelBtn); }
+            else if(session.step === 'AN') { session.data.an=text; session.step='QR'; ctx.reply("QRIS:", cancelBtn); }
+            else if(session.step === 'QR') { await db.collection('settings').doc('payment').set({info:`🏦 ${session.data.bank}\n🔢 ${session.data.no}\n👤 ${session.data.an}`, qris: text==='skip'?'':text}); delete adminSession[userId]; ctx.reply("✅ Saved."); }
+            return;
+        }
+        else if (session.type === 'SET_BG') { await db.collection('settings').doc('layout').set({ backgroundUrl: ctx.message.photo ? ctx.message.photo[ctx.message.photo.length - 1].file_id : text }, { merge: true }); delete adminSession[userId]; ctx.reply("✅ Background OK."); return; }
+        else if (session.type === 'EDIT_MAIN') { await db.collection('products').doc(session.prodId).update({[session.field]:(session.field.includes('price')||session.field.includes('sold'))?parseInt(text):text}); delete adminSession[userId]; ctx.reply("Updated."); return; }
+        else if (session.type === 'EDIT_VAR') { const ref=db.collection('products').doc(session.prodId); const s=await ref.get(); let v=s.data().variations; v[session.varIdx][session.field]=(session.field==='price')?parseInt(text):text; await ref.update({variations:v}); delete adminSession[userId]; ctx.reply("Updated."); return; }
+        else if (session.type === 'REPLY_COMPLAIN') { 
+            await db.collection('orders').doc(session.orderId).update({adminReply:text, complainResolved:true}); 
+            // NOTIF BALIK KE USER
+            const orderSnap = await db.collection('orders').doc(session.orderId).get();
+            if(orderSnap.exists) {
+                const orderData = orderSnap.data();
+                await notifyUser(orderData.buyerPhone, `🔔 *BALASAN ADMIN*\nUntuk Order: \`${session.orderId}\`\n\n💬 "${text}"\n\n_Silakan cek riwayat pesanan di web._`);
+            }
+            delete adminSession[userId]; ctx.reply("Terkirim."); return; 
+        }
+    }
+
+    // ===============================================
+    // 🔍 UNIVERSAL SEARCH (JIKA TIDAK ADA SESI)
+    // ===============================================
+    if (text) {
+        ctx.reply("🔍 Sedang mencari...");
+
+        // A. CEK ORDER ID
+        try {
+            const orderSnap = await db.collection('orders').doc(text).get();
+            if (orderSnap.exists) {
+                const o = orderSnap.data();
+                return ctx.reply(`📦 *ORDER ${orderSnap.id}*\nStatus: ${o.status}\nItems: ${o.items.length}\nUser: ${o.buyerPhone}`, {parse_mode:'Markdown',...Markup.inlineKeyboard([[Markup.button.callback('🛠 MENU EDIT', `menu_edit_ord_${orderSnap.id}`)],[Markup.button.callback('🗑 HAPUS', `del_order_${orderSnap.id}`)]])});
+            }
+        } catch(e){}
+
+        // B. CEK PRODUK
+        try {
+            const allProds = await db.collection('products').get();
+            let found = null;
+            allProds.forEach(doc => { 
+                const p = doc.data(); 
+                if ((p.code && p.code.toLowerCase() === textLower) || (p.name && p.name.toLowerCase().includes(textLower)) || (p.variations && p.variations.some(v => v.code && v.code.toLowerCase() === textLower))) {
+                    found = { id: doc.id, ...p };
+                }
             });
             if (found) {
                 return ctx.reply(`🔎 *${found.name}*\n🏷 Kode: ${found.code}\n💰 Rp ${found.price}`, {
@@ -440,7 +659,7 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
             }
         } catch(e){}
 
-        ctx.reply("❌ Tidak ditemukan (Order/Produk/User).\nKetik /voucher atau /unban untuk perintah khusus.");
+        ctx.reply("❌ Tidak ditemukan. Ketik 'help' untuk panduan.");
     }
 });
 
