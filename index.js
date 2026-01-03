@@ -198,8 +198,7 @@ app.post('/api/complain', async (req, res) => {
 });
 
 app.post('/api/notify-order', async (req, res) => {
-app.post('/api/notify-order', async (req, res) => {
-    const { orderId, buyerPhone, total, items, voucherCode } = req.body; // Pastikan terima voucherCode
+    const { orderId, buyerPhone, total, items, voucherCode } = req.body; 
     const docRef = db.collection('orders').doc(orderId);
     const docSnap = await docRef.get();
     
@@ -208,14 +207,12 @@ app.post('/api/notify-order', async (req, res) => {
         const security = await validateOrderSecurity(orderId, orderData);
         
         if (!security.isSafe) {
-            // --- HUKUMAN: PINDAHKAN KE PENJARA (BANNED LIST) ---
             await docRef.update({ status: 'FRAUD', adminReply: 'BANNED: CHEATING.' });
             
             if (orderData.uid) {
                 const userRef = db.collection('users').doc(orderData.uid);
                 const userSnap = await userRef.get();
                 
-                // Jika data user ada, Backup dulu baru hapus
                 if (userSnap.exists) {
                     await db.collection('banned_users').doc(orderData.uid).set({
                         ...userSnap.data(),
@@ -223,13 +220,18 @@ app.post('/api/notify-order', async (req, res) => {
                         reason: `Fraud Order ${orderId}`,
                         lastBalance: userSnap.data().balance || 0
                     });
-                    await userRef.delete(); // Hapus dari user aktif
+                    await userRef.delete(); 
                 }
             }
             
             await bot.telegram.sendMessage(ADMIN_ID, `🚨 *MALING DITANGKAP!* \nOrder: \`${orderId}\` \nUser: ${buyerPhone}\nUID: \`${orderData.uid}\`\n\n🛡 *Tindakan:* User dipindah ke BANNED LIST (Saldo Aman).`);
             return res.json({ status: 'fraud' });
         }
+        
+        let txt = items.map(i => `- ${i.name} (x${i.qty})`).join('\n');
+        await bot.telegram.sendMessage(ADMIN_ID, `✅ *ORDER LUNAS (SALDO)*\n🆔 \`${orderId}\`\n👤 ${buyerPhone}\n💰 Rp ${parseInt(total).toLocaleString()}\n\n${txt}`, { parse_mode: 'Markdown' });
+        await processOrderLogic(orderId, orderData);
+    }
     res.json({ status: 'ok' });
 });
 
@@ -269,25 +271,18 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
     const userId = ctx.from.id;
     const session = adminSession[userId];
 
-    // ============================================
-    // VOUCHER COMMANDS (GLOBAL ACCESS)
-    // ============================================
-    // Moved OUTSIDE session check so it works anytime
+    // --- FITUR ADMIN: VOUCHER ---
     if (text.startsWith('/voucher ')) {
         const parts = text.split(' ');
         if (parts.length === 3) {
             const code = parts[1].toUpperCase();
             const amount = parseInt(parts[2]);
             if (!isNaN(amount)) {
-                await db.collection('vouchers').doc(code).set({ 
-                    amount: amount, 
-                    active: true,
-                    createdAt: new Date() 
-                });
+                await db.collection('vouchers').doc(code).set({ amount: amount, active: true, createdAt: new Date() });
                 return ctx.reply(`🎟 *VOUCHER DIBUAT*\nKode: \`${code}\`\nDiskon: Rp ${amount.toLocaleString()}`, {parse_mode:'Markdown'});
             }
         }
-        return ctx.reply("❌ Format Salah. Ketik: `/voucher KODE NOMINAL`\nContoh: `/voucher BERKAH 5000`", {parse_mode:'Markdown'});
+        return ctx.reply("❌ Format: `/voucher KODE NOMINAL`", {parse_mode:'Markdown'});
     }
 
     if (text.startsWith('/delvoucher ')) {
@@ -295,43 +290,31 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
         await db.collection('vouchers').doc(code).delete();
         return ctx.reply(`🗑 Voucher \`${code}\` dihapus.`);
     }
-     // --- FITUR ADMIN: UNBAN USER (Memulihkan Saldo) ---
+
+    // --- FITUR ADMIN: UNBAN ---
     if (text.startsWith('/unban ')) {
         const targetUid = text.split(' ')[1].trim();
         const jailRef = db.collection('banned_users').doc(targetUid);
         const jailSnap = await jailRef.get();
-
         if (jailSnap.exists) {
             const savedData = jailSnap.data();
-            
-            // Kembalikan ke koleksi users
-            await db.collection('users').doc(targetUid).set({
-                ...savedData,
-                restoredAt: new Date() // Tandai pernah di-restore
-            });
-            
-            // Hapus dari penjara
+            await db.collection('users').doc(targetUid).set({ ...savedData, restoredAt: new Date() });
             await jailRef.delete();
-            
             return ctx.reply(`✅ *USER DI-UNBAN!*\nUID: \`${targetUid}\`\n💰 Saldo Kembali: Rp ${savedData.balance?.toLocaleString()}`, {parse_mode:'Markdown'});
         } else {
             return ctx.reply("❌ Data user tidak ditemukan di daftar Banned.");
         }
+    }
     
-    
-    // --- FITUR ADMIN: CEK LIST BANNED ---
     if (text === '/listban') {
         const snaps = await db.collection('banned_users').get();
         if (snaps.empty) return ctx.reply("Daftar Banned Kosong. Aman.");
-        
         let msg = "🚫 *DAFTAR BANNED (PENJARA)*\n";
-        snaps.forEach(d => {
-            const u = d.data();
-            msg += `\n👤 ${u.email || u.name}\n🆔 \`${d.id}\`\n💰 Saldo Tertahan: ${u.balance}\n`;
-        });
+        snaps.forEach(d => { const u = d.data(); msg += `\n👤 ${u.email || u.name}\n🆔 \`${d.id}\`\n💰 Saldo Tertahan: ${u.balance}\n`; });
         return ctx.reply(msg, {parse_mode:'Markdown'});
     }
-    // --- 1. JIKA SEDANG ADA SESI WIZARD (INPUT BERTAHAP) ---
+
+    // --- JIKA SEDANG ADA SESI WIZARD ---
     if (session) {
         if (session.type === 'REVISI') {
             if (!isNaN(text) && parseInt(text) > 0 && text.length < 5) {
@@ -390,7 +373,7 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
         else if (session.type === 'REPLY_COMPLAIN') { await db.collection('orders').doc(session.orderId).update({adminReply:text, complainResolved:true}); delete adminSession[userId]; ctx.reply("Terkirim."); return; }
     }
 
-    // --- 2. JIKA TIDAK ADA SESI -> UNIVERSAL SEARCH (MATA ELANG) ---
+    // --- JIKA TIDAK ADA SESI -> UNIVERSAL SEARCH ---
     if (text) {
         ctx.reply("🔍 Sedang mencari...");
 
@@ -457,8 +440,7 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
             }
         } catch(e){}
 
-        // D. GAGAL
-        ctx.reply("❌ Tidak ditemukan (Order/Produk/User/Voucher).\nUntuk buat voucher: /voucher KODE 5000");
+        ctx.reply("❌ Tidak ditemukan (Order/Produk/User).\nKetik /voucher atau /unban untuk perintah khusus.");
     }
 });
 
