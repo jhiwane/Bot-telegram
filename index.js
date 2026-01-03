@@ -29,24 +29,50 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 const cancelBtn = Markup.inlineKeyboard([Markup.button.callback('❌ BATAL', 'cancel_action')]);
 
 // ==========================================
-// 2. SECURITY & CORE LOGIC
+// 2. SECURITY CHECK (POLISI ANTI-HACK + VOUCHER AWARE)
 // ==========================================
 const validateOrderSecurity = async (orderId, orderData) => {
     let calculatedTotal = 0;
+    
+    // 1. Hitung Harga Asli Produk
     for (const item of orderData.items) {
         const prodRef = db.collection('products').doc(item.id);
         const prodSnap = await prodRef.get();
-        if (!prodSnap.exists) continue;
+        
+        if (!prodSnap.exists) continue; 
+        
         const p = prodSnap.data();
-        let realPrice = p.price;
+        let realPrice = p.price; 
+
         if (item.variantName && item.variantName !== 'Regular' && p.variations) {
             const variant = p.variations.find(v => v.name === item.variantName);
             if (variant) realPrice = parseInt(variant.price);
         }
+
         calculatedTotal += (realPrice * item.qty);
     }
-    // Allow slight tolerance (e.g. for rounding or manual adjustments if any)
-    if (orderData.total < (calculatedTotal - 500)) return { isSafe: false, realTotal: calculatedTotal };
+
+    // 2. CEK VOUCHER (Jika User Pakai)
+    if (orderData.voucherCode) {
+        const vRef = db.collection('vouchers').doc(orderData.voucherCode);
+        const vSnap = await vRef.get();
+        
+        // Pastikan Voucher Ada & Aktif
+        if (vSnap.exists && vSnap.data().active) {
+            // Kurangi Total Hitungan dengan Nilai Voucher
+            calculatedTotal -= vSnap.data().amount;
+        }
+    }
+
+    // Pastikan tidak minus
+    calculatedTotal = Math.max(0, calculatedTotal);
+
+    // 3. BANDINGKAN
+    // Jika Total yang dikirim User LEBIH KECIL dari (Total Hitungan - 500 perak) -> MALING
+    if (orderData.total < (calculatedTotal - 500)) {
+        return { isSafe: false, realTotal: calculatedTotal };
+    }
+    
     return { isSafe: true };
 };
 
@@ -172,22 +198,38 @@ app.post('/api/complain', async (req, res) => {
 });
 
 app.post('/api/notify-order', async (req, res) => {
-    const { orderId, buyerPhone, total, items } = req.body;
+app.post('/api/notify-order', async (req, res) => {
+    const { orderId, buyerPhone, total, items, voucherCode } = req.body; // Pastikan terima voucherCode
     const docRef = db.collection('orders').doc(orderId);
     const docSnap = await docRef.get();
+    
     if (docSnap.exists) {
         const orderData = docSnap.data();
         const security = await validateOrderSecurity(orderId, orderData);
+        
         if (!security.isSafe) {
+            // --- HUKUMAN: PINDAHKAN KE PENJARA (BANNED LIST) ---
             await docRef.update({ status: 'FRAUD', adminReply: 'BANNED: CHEATING.' });
-            if (orderData.uid) await db.collection('users').doc(orderData.uid).delete();
-            await bot.telegram.sendMessage(ADMIN_ID, `🚨 *MALING!* Order: \`${orderId}\` User: ${buyerPhone}. Harga Fake: ${total} vs Asli: ${security.realTotal}. USER BANNED.`);
+            
+            if (orderData.uid) {
+                const userRef = db.collection('users').doc(orderData.uid);
+                const userSnap = await userRef.get();
+                
+                // Jika data user ada, Backup dulu baru hapus
+                if (userSnap.exists) {
+                    await db.collection('banned_users').doc(orderData.uid).set({
+                        ...userSnap.data(),
+                        bannedAt: new Date(),
+                        reason: `Fraud Order ${orderId}`,
+                        lastBalance: userSnap.data().balance || 0
+                    });
+                    await userRef.delete(); // Hapus dari user aktif
+                }
+            }
+            
+            await bot.telegram.sendMessage(ADMIN_ID, `🚨 *MALING DITANGKAP!* \nOrder: \`${orderId}\` \nUser: ${buyerPhone}\nUID: \`${orderData.uid}\`\n\n🛡 *Tindakan:* User dipindah ke BANNED LIST (Saldo Aman).`);
             return res.json({ status: 'fraud' });
         }
-        let txt = items.map(i => `- ${i.name} (x${i.qty})`).join('\n');
-        await bot.telegram.sendMessage(ADMIN_ID, `✅ *ORDER LUNAS (SALDO)*\n🆔 \`${orderId}\`\n👤 ${buyerPhone}\n💰 Rp ${parseInt(total).toLocaleString()}\n\n${txt}`, { parse_mode: 'Markdown' });
-        await processOrderLogic(orderId, orderData);
-    }
     res.json({ status: 'ok' });
 });
 
@@ -253,7 +295,42 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
         await db.collection('vouchers').doc(code).delete();
         return ctx.reply(`🗑 Voucher \`${code}\` dihapus.`);
     }
+     // --- FITUR ADMIN: UNBAN USER (Memulihkan Saldo) ---
+    if (text.startsWith('/unban ')) {
+        const targetUid = text.split(' ')[1].trim();
+        const jailRef = db.collection('banned_users').doc(targetUid);
+        const jailSnap = await jailRef.get();
 
+        if (jailSnap.exists) {
+            const savedData = jailSnap.data();
+            
+            // Kembalikan ke koleksi users
+            await db.collection('users').doc(targetUid).set({
+                ...savedData,
+                restoredAt: new Date() // Tandai pernah di-restore
+            });
+            
+            // Hapus dari penjara
+            await jailRef.delete();
+            
+            return ctx.reply(`✅ *USER DI-UNBAN!*\nUID: \`${targetUid}\`\n💰 Saldo Kembali: Rp ${savedData.balance?.toLocaleString()}`, {parse_mode:'Markdown'});
+        } else {
+            return ctx.reply("❌ Data user tidak ditemukan di daftar Banned.");
+        }
+    }
+    
+    // --- FITUR ADMIN: CEK LIST BANNED ---
+    if (text === '/listban') {
+        const snaps = await db.collection('banned_users').get();
+        if (snaps.empty) return ctx.reply("Daftar Banned Kosong. Aman.");
+        
+        let msg = "🚫 *DAFTAR BANNED (PENJARA)*\n";
+        snaps.forEach(d => {
+            const u = d.data();
+            msg += `\n👤 ${u.email || u.name}\n🆔 \`${d.id}\`\n💰 Saldo Tertahan: ${u.balance}\n`;
+        });
+        return ctx.reply(msg, {parse_mode:'Markdown'});
+    }
     // --- 1. JIKA SEDANG ADA SESI WIZARD (INPUT BERTAHAP) ---
     if (session) {
         if (session.type === 'REVISI') {
