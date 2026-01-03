@@ -327,6 +327,7 @@ Membebaskan user yang terblokir.
 - Ketik *Nama/Kode Produk* untuk edit stok.
 - Ketik *Email/UID User* untuk isi saldo.
 - Ketik *ID Order* untuk revisi/cek order.
+
 `;
         return ctx.reply(msg, {parse_mode: 'Markdown'});
     }
@@ -347,7 +348,18 @@ Membebaskan user yang terblokir.
         adminSession[userId] = { type: 'DO_UNBAN', step: 'UID' };
         return ctx.reply("🔓 **UNBAN USER**\n\nSilakan kirim/paste **UID USER** yang mau dibebaskan:", cancelBtn);
     }
-
+    // --- FITUR HAPUS VOUCHER MANUAL (PAKAI SLASH) ---
+    if (text.startsWith('/delvoucher ')) {
+        const parts = text.split(' ');
+        // Pastikan formatnya benar (ada kodenya)
+        if (parts.length > 1) {
+            const code = parts[1].toUpperCase();
+            await db.collection('vouchers').doc(code).delete();
+            return ctx.reply(`🗑 Voucher \`${code}\` berhasil dihapus.`);
+        } else {
+            return ctx.reply("❌ Format salah. Ketik: `/delvoucher KODE`");
+        }
+    }
     // ===============================================
     // 🧠 LOGIKA SESI (JAWABAN DARI PERTANYAAN BOT)
     // ===============================================
