@@ -144,11 +144,29 @@ const processOrderLogic = async (orderId, orderData) => {
 // ==========================================
 // 3. API WEBHOOKS
 // ==========================================
+// A. KONFIRMASI PEMBAYARAN MANUAL (FIXED RESPONSE)
 app.post('/api/confirm-manual', async (req, res) => {
-    const { orderId, buyerPhone, total, items } = req.body;
-    let txt = items.map(i => `- ${i.name} (x${i.qty})`).join('\n');
-    bot.telegram.sendMessage(ADMIN_ID, `🔔 *MANUAL ORDER*\n🆔 \`${orderId}\`\n👤 ${buyerPhone}\n💰 Rp ${parseInt(total).toLocaleString()}\n\n${txt}`, Markup.inlineKeyboard([[Markup.button.callback('⚡ PROSES', `acc_${orderId}`), Markup.button.callback('❌ TOLAK', `tolak_${orderId}`)]]));
-    res.json({ status: 'ok' });
+    try {
+        const { orderId, buyerPhone, total, items } = req.body;
+        let txt = items.map(i => `- ${i.name} (x${i.qty})`).join('\n');
+        
+        // Await agar kita tahu pesan terkirim atau gagal
+        await bot.telegram.sendMessage(ADMIN_ID, 
+            `🔔 *ORDER MASUK (MANUAL)*\n🆔 \`${orderId}\`\n👤 ${buyerPhone}\n💰 Rp ${parseInt(total).toLocaleString()}\n\n${txt}`, 
+            Markup.inlineKeyboard([
+                [Markup.button.callback('⚡ PROSES', `acc_${orderId}`)],
+                [Markup.button.callback('❌ TOLAK', `tolak_${orderId}`)]
+            ])
+        );
+        
+        // Kirim sinyal SUKSES ke Frontend
+        res.status(200).json({ status: 'ok' });
+        
+    } catch (error) {
+        console.error("Gagal kirim notif manual:", error);
+        // Kirim sinyal ERROR ke Frontend (Penting agar Frontend bisa kasih Fallback)
+        res.status(500).json({ status: 'error', message: error.message });
+    }
 });
 
 app.post('/api/complain', async (req, res) => {
