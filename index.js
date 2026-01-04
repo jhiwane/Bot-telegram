@@ -87,7 +87,6 @@ const beliGeneric = async (apiUrl, serviceCode, target) => {
         } 
         
         // SKENARIO 2: URL BEBAS / GRATISAN / SUNTIK (GET REQUEST)
-        // [UPDATE]: Menambahkan penanganan respon Google Apps Script
         else {
             const separator = apiUrl.includes('?') ? '&' : '?';
             const fullUrl = `${apiUrl}${separator}service=${serviceCode}&target=${target}`;
@@ -154,10 +153,6 @@ bot.use(async (ctx, next) => {
     if (ctx.from) {
         // Jika ID pengirim TIDAK SAMA dengan ADMIN_ID
         if (String(ctx.from.id) !== process.env.ADMIN_ID) {
-            // Opsional: Balas biar mereka tau ini bot private
-            // await ctx.reply("⛔ Akses Ditolak. Ini bot private admin.");
-            
-            // Hentikan proses. Bot tidak akan membaca kode di bawahnya.
             return; 
         }
     }
@@ -256,7 +251,6 @@ const processStock = async (productId, variantName, qtyNeeded, forceHunterMode =
             };
         }
 
-        // FIX: Pastikan sold dihitung sebagai integer
         const currentSold = parseInt(data.sold) || 0;
         const inc = parseInt(qtyNeeded);
 
@@ -293,7 +287,7 @@ const processStock = async (productId, variantName, qtyNeeded, forceHunterMode =
     });
 };
 
-// [UPDATE]: processOrderLogic YANG SUDAH DIPERBAIKI (STATUS LOGIC & SMART FILL)
+// [UPDATE]: processOrderLogic YANG SUDAH DIPERBAIKI (STATUS LOGIC & SMART FILL & FIX SOLD COUNT)
 const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
     let items = [], allComplete = true, hasPartial = false, msgLog = "", revBtns = [];
 
@@ -305,7 +299,7 @@ const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
         const exContent = item.content || "";
         const isPending = exContent.includes('[...MENUNGGU') || exContent === "";
         
-        // Jika item sudah selesai dan tidak dalam mode FORCE, skip proses (biar gak double beli)
+        // Jika item sudah selesai dan tidak dalam mode FORCE, skip proses
         if (!isPending && !forceHunter) {
             items.push(item);
             msgLog += `✅ ${item.name}: DONE\n`;
@@ -393,40 +387,47 @@ const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
         // TAHAP 2: STOK MANUAL (LAMA + AUTO HUNTER + FORCE MODE)
         // ============================================================
         
+        // [FIX PERBAIKAN 1]: Jangan kosongkan currentLines saat Force. 
+        // Ambil data yang ada, filter yang bukan 'MENUNGGU'.
         let currentContentLines = item.content ? item.content.split('\n') : [];
-        if (forceHunter) currentContentLines = []; // Reset jika dipaksa
-
-        let validLines = currentContentLines.filter(l => !l.includes('[...MENUNGGU'));
+        let validLines = currentContentLines.filter(l => !l.includes('[...MENUNGGU') && l.trim().length > 0);
         let validLinesCount = validLines.length;
+
+        // Hitung kekurangan (Jika forceHunter, qtyButuh = qty total - yang sudah valid)
         let qtyButuh = item.qty - validLinesCount;
         
-        if (qtyButuh <= 0) { items.push(item); msgLog += `✅ ${item.name}: OK\n`; continue; }
+        if (qtyButuh <= 0 && !forceHunter) { 
+            items.push(item); 
+            msgLog += `✅ ${item.name}: OK (Lengkap)\n`; 
+            continue; 
+        }
 
         try {
-            // [UPDATE]: Panggil processStock dengan forceHunterMode
+            // Panggil processStock (Jika forceHunter=true, ini akan return stock 0 dan lari ke backup/hunter)
             const result = await processStock(item.id, item.variantName, qtyButuh, forceHunter);
             
             if (result && result.success) {
-                // STOK CUKUP
-                const validLines = currentContentLines.filter(l => !l.includes('[...MENUNGGU'));
+                // STOK DATABASE CUKUP
                 let newContent = result.data;
                 const finalContent = result.currentStock === 999999 ? newContent : [...validLines, ...newContent.split('\n')].join('\n');
                 items.push({ ...item, content: finalContent });
-                msgLog += `✅ ${item.name}: SUKSES\n`;
+                msgLog += `✅ ${item.name}: SUKSES (DB)\n`;
 
             } else if (result && !result.success) {
-                // STOK KURANG -> CEK HUNTER
+                // STOK DB KURANG -> CEK HUNTER
                 let stockFromDB = [];
                 
-                // Ambil stok manual yang ada (jika tidak force)
+                // Ambil stok manual yang tersisa di DB (jika tidak force)
                 if(result.currentStock > 0 && !forceHunter) {
                     const partialRes = await processStock(item.id, item.variantName, result.currentStock);
                     stockFromDB = partialRes.data.split('\n');
                 }
 
-                const currentHave = (forceHunter ? 0 : validLinesCount) + stockFromDB.length;
+                // Hitung lagi sisa yang harus dicari via Hunter
+                const currentHave = validLinesCount + stockFromDB.length;
                 const stillNeed = item.qty - currentHave;
                 let hunterContent = [];
+                let hunterSuccessCount = 0;
 
                 // LOGIKA HUNTER (AUTO_BACKUP)
                 if (result.backupConfig && stillNeed > 0) {
@@ -435,17 +436,31 @@ const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
                         console.log(`🤖 Hunter Active: Mencari ${stillNeed} via Backup...`);
                         for(let k=0; k<stillNeed; k++) {
                             const hasil = await beliGeneric(url, sku, orderData.buyerPhone);
-                            if(hasil.sukses) hunterContent.push(`${hasil.sn}`);
-                            else hunterContent.push(`[...MENUNGGU PROSES (API Gagal)...]`);
+                            if(hasil.sukses) {
+                                hunterContent.push(`${hasil.sn}`);
+                                hunterSuccessCount++;
+                            }
+                            else {
+                                hunterContent.push(`[...MENUNGGU PROSES (API Gagal)...]`);
+                            }
                         }
                     }
                 }
 
-                // [FIX]: Gabungkan semua sumber dengan benar
-                let prevLines = forceHunter ? [] : validLines;
-                let finalLines = [...prevLines, ...stockFromDB, ...hunterContent];
+                // [FIX PERBAIKAN 2]: Update Sold jika berhasil Hunter
+                if (hunterSuccessCount > 0) {
+                    try {
+                        await db.collection('products').doc(item.id).update({
+                            sold: admin.firestore.FieldValue.increment(hunterSuccessCount)
+                        });
+                        console.log(`✅ Sold Count Updated (+${hunterSuccessCount}) from Hunter`);
+                    } catch(e) { console.log("Gagal update sold hunter:", e); }
+                }
+
+                // Gabungkan semua sumber data (Valid Lama + Stok DB Baru + Hasil Hunter)
+                let finalLines = [...validLines, ...stockFromDB, ...hunterContent];
                 
-                // Isi sisa dengan placeholder MENUNGGU
+                // Isi sisa dengan placeholder MENUNGGU jika masih kurang
                 const totalSekarang = finalLines.length;
                 const totalKurang = item.qty - totalSekarang;
 
@@ -468,7 +483,6 @@ const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
     // TAHAP 4: FINALISASI & NOTIFIKASI
     // ============================================================
     
-    // [UPDATE PENTING]: LOGIKA STATUS ORDER
     let finalStatus = 'pending';
     if (allComplete) finalStatus = 'success';
     else if (hasPartial) finalStatus = 'processing';
@@ -477,7 +491,6 @@ const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
     await db.collection('orders').doc(orderId).update({ items, status: finalStatus, processed: true });
 
     if (!allComplete) {
-        // [UPDATE]: Jika belum lengkap, kasih tombol Force Send juga
         revBtns.push([Markup.button.callback('⚡ PROSES PAKSA (REVISI)', `force_send_${orderId}`)]);
         bot.telegram.sendMessage(ADMIN_ID, `⚠️ *ORDER ${orderId} BELUM LENGKAP*\nStatus: ${finalStatus.toUpperCase()}\n\n${msgLog}\nSegera isi manual!`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(revBtns) });
     } else {
@@ -519,7 +532,6 @@ app.post('/api/confirm-manual', async (req, res) => {
         const { orderId, buyerPhone, total, items } = req.body;
         let txt = items.map(i => `- ${i.name} (x${i.qty})`).join('\n');
         
-        // [UPDATE]: Tombol Force Send
         await bot.telegram.sendMessage(ADMIN_ID, 
             `🔔 *ORDER MASUK (MANUAL)*\n🆔 \`${orderId}\`\n👤 ${buyerPhone}\n💰 Rp ${parseInt(total).toLocaleString()}\n\n${txt}\n\n_Jika uang sudah masuk, klik Proses Paksa._`, 
             Markup.inlineKeyboard([
@@ -629,18 +641,15 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
                 delete adminSession[ctx.from.id];
                 return ctx.reply("✅ **IMPORT SUKSES!**\nSemua data telah dikembalikan.");
             } 
-            // [UPDATE]: LOGIKA UPLOAD STOK KE GOOGLE SHEET
             else if (session && session.type === 'RESTOCK_SHEET') {
                 ctx.reply("⏳ Membaca file & Upload ke Sheet...");
                 const rawData = response.data; 
                 let stockArray = [];
                 if (typeof rawData === 'string') {
-                    // Split per baris, hapus yang kosong
                     stockArray = rawData.split('\n').map(s => s.trim()).filter(s => s.length > 0);
                 }
                 if (stockArray.length === 0) return ctx.reply("❌ File kosong atau bukan text.");
 
-                // Kirim ke Script
                 try {
                     const resGoogle = await axios.post(session.targetUrl, { data: stockArray }, { headers: { 'Content-Type': 'application/json' } });
                     if (String(resGoogle.data).includes('BERHASIL')) {
@@ -667,7 +676,6 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
     // 🔥 BAGIAN PERINTAH "TANPA SLASH" (DIPANDU) 🔥
     // ===============================================
 
-    // A. FITUR HELP (PANDUAN)
     if (textLower === 'help' || textLower === 'bantuan') {
         const msg = `
 📘 **PANDUAN ADMIN JIE STORE**
@@ -687,31 +695,26 @@ Membebaskan user yang terblokir.
 - Ketik *Nama/Kode Produk* untuk edit stok.
 - Ketik *Email/UID User* untuk isi saldo.
 - Ketik *ID Order* untuk revisi/cek order.
-
 `;
         return ctx.reply(msg, {parse_mode: 'Markdown'});
     }
 
-    // B. FITUR MENU
     if (textLower === 'menu' || textLower === 'admin') {
         return ctx.reply("🛠 *PANEL ADMIN*", mainMenu);
     }
 
-    // C. FITUR BUAT VOUCHER (WIZARD)
     if (textLower === 'voucher') {
         adminSession[userId] = { type: 'MAKE_VOUCHER', step: 'CODE', data: {} };
         return ctx.reply("🎫 **BUAT VOUCHER BARU**\n\nSilakan ketik KODE VOUCHER yang diinginkan (Misal: PROMO10K):", cancelBtn);
     }
 
-    // D. FITUR UNBAN USER (WIZARD)
     if (textLower === 'unban') {
         adminSession[userId] = { type: 'DO_UNBAN', step: 'UID' };
         return ctx.reply("🔓 **UNBAN USER**\n\nSilakan kirim/paste **UID USER** yang mau dibebaskan:", cancelBtn);
     }
-    // --- FITUR HAPUS VOUCHER MANUAL (PAKAI SLASH) ---
+    
     if (text.startsWith('/delvoucher ')) {
         const parts = text.split(' ');
-        // Pastikan formatnya benar (ada kodenya)
         if (parts.length > 1) {
             const code = parts[1].toUpperCase();
             await db.collection('vouchers').doc(code).delete();
@@ -720,18 +723,17 @@ Membebaskan user yang terblokir.
             return ctx.reply("❌ Format salah. Ketik: `/delvoucher KODE`");
         }
     }
+    
     // ===============================================
     // 🧠 LOGIKA SESI (JAWABAN DARI PERTANYAAN BOT)
     // ===============================================
     if (session) {
-        // [UPDATE]: SESI UPLOAD STOK SHEET
         if (session.type === 'ASK_SHEET_URL') {
             if (!text.includes('script.google.com')) return ctx.reply("❌ URL Salah. Harus link Google Script.", cancelBtn);
             session.type = 'RESTOCK_SHEET'; session.targetUrl = text;
             ctx.reply("📂 Oke. Sekarang **Kirim File .txt** (Format: KODE|DATA).", cancelBtn); return;
         }
 
-        // --- FITUR BARU: ADD VARIATION TO EXISTING PRODUCT ---
         else if (session.type === 'ADD_VAR_EXISTING') {
             const prodRef = db.collection('products').doc(session.prodId);
             const docSnap = await prodRef.get();
@@ -790,10 +792,9 @@ Membebaskan user yang terblokir.
             return;
         }
 
-        // --- PROSES PEMBUATAN VOUCHER (DIPANDU) ---
         else if (session.type === 'MAKE_VOUCHER') {
             if (session.step === 'CODE') {
-                session.data.code = text.toUpperCase().replace(/\s/g, ''); // Hapus spasi & kapital
+                session.data.code = text.toUpperCase().replace(/\s/g, ''); 
                 session.step = 'AMOUNT';
                 return ctx.reply(`✅ Kode: **${session.data.code}**\n\nSekarang masukkan **NOMINAL DISKON** (Angka saja, misal: 5000):`, cancelBtn);
             } 
@@ -801,7 +802,6 @@ Membebaskan user yang terblokir.
                 const amount = parseInt(text);
                 if (isNaN(amount)) return ctx.reply("⚠️ Harap masukkan angka saja!", cancelBtn);
                 
-                // Simpan ke Database
                 await db.collection('vouchers').doc(session.data.code).set({ 
                     amount: amount, 
                     active: true, 
@@ -813,7 +813,6 @@ Membebaskan user yang terblokir.
             }
         }
 
-        // --- PROSES UNBAN (DIPANDU) ---
         else if (session.type === 'DO_UNBAN') {
             const targetUid = text.trim();
             const jailRef = db.collection('banned_users').doc(targetUid);
@@ -821,12 +820,10 @@ Membebaskan user yang terblokir.
             
             if (jailSnap.exists) {
                 const savedData = jailSnap.data();
-                // Kembalikan ke table users
                 await db.collection('users').doc(targetUid).set({ 
                     ...savedData, 
                     restoredAt: new Date() 
                 });
-                // Hapus dari penjara
                 await jailRef.delete();
                 delete adminSession[userId];
                 return ctx.reply(`✅ **USER DI-UNBAN!**\nUID: \`${targetUid}\`\n💰 Saldo Kembali: Rp ${savedData.balance?.toLocaleString()}`);
@@ -835,8 +832,7 @@ Membebaskan user yang terblokir.
             }
         }
 
-        // --- LOGIKA SESI LAMA (ADD PRODUK, REVISI, DLL) ---
-        // [UPDATE FIX]: LOGIKA REVISI STOK (SMART FILL & STATUS UDPATE)
+        // [UPDATE FIX]: LOGIKA REVISI STOK (SMART FILL & STATUS UPDATE)
         else if (session.type === 'REVISI') {
             // Jika admin kirim angka kecil (untuk edit baris tertentu)
             if (!isNaN(text) && parseInt(text) > 0 && text.length < 5) {
@@ -999,7 +995,7 @@ Membebaskan user yang terblokir.
         else if (session.type === 'EDIT_VAR') { const ref=db.collection('products').doc(session.prodId); const s=await ref.get(); let v=s.data().variations; v[session.varIdx][session.field]=(session.field==='price')?parseInt(text):text; await ref.update({variations:v}); delete adminSession[userId]; ctx.reply("Updated."); return; }
         else if (session.type === 'REPLY_COMPLAIN') { 
             await db.collection('orders').doc(session.orderId).update({adminReply:text, complainResolved:true}); 
-            // NOTIF BALIK KE USER [UPDATE: Kata-kata sopan]
+            // NOTIF BALIK KE USER
             const orderSnap = await db.collection('orders').doc(session.orderId).get();
             if(orderSnap.exists) {
                 const orderData = orderSnap.data();
@@ -1016,7 +1012,7 @@ Membebaskan user yang terblokir.
     if (text) {
         ctx.reply("🔍 Sedang mencari...");
 
-        // A. CEK ORDER ID [UPDATE: Tombol Force Send]
+        // A. CEK ORDER ID
         try {
             const orderSnap = await db.collection('orders').doc(text).get();
             if (orderSnap.exists) {
@@ -1094,7 +1090,6 @@ Membebaskan user yang terblokir.
 });
 
 // --- ACTION HANDLERS ---
-// [UPDATE]: Handler Upload Stok
 bot.action('restock_sheet_ask', (ctx) => { adminSession[ctx.from.id] = { type: 'ASK_SHEET_URL' }; ctx.reply("🔗 Kirim **URL Google Apps Script**:", cancelBtn); });
 
 bot.action('list_pending', async (ctx) => {
@@ -1164,7 +1159,8 @@ bot.action(/^menu_edit_ord_(.+)$/, async (ctx) => { const oid = ctx.match[1]; co
     btns.push([Markup.button.callback('⚡ PROSES DATA (REVISI OTOMATIS)', `force_send_${oid}`)]);
     ctx.reply(`🛠 Pilih item:`, Markup.inlineKeyboard(btns)); 
 });
-// [UPDATE FIX]: HANDLER TOMBOL EDIT (HANDLE EMPTY CONTENT)
+
+// [UPDATE FIX]: HANDLER TOMBOL EDIT (HANDLE EMPTY CONTENT & INPUT DADAKAN)
 bot.action(/^rev_(.+)_(.+)$/, async (ctx)=>{ 
     const orderId = ctx.match[1]; 
     const itemIdx = parseInt(ctx.match[2]); 
@@ -1175,7 +1171,7 @@ bot.action(/^rev_(.+)_(.+)$/, async (ctx)=>{
     let msg = `🔧 *EDIT: ${item.name}*\n\n`; 
     // Handle stok kosong
     if (!content || content.length < 2) {
-        msg += "⚠️ **STOK KOSONG (MENUNGGU)**\nSilakan kirim teks akun/voucher untuk mengisi.";
+        msg += "⚠️ **STOK KOSONG (MENUNGGU)**\nSilakan **REPLY** pesan ini dengan akun/voucher untuk mengisi otomatis slot kosong.";
     } else {
         if (content.length > 3000) { 
             const buffer = Buffer.from(content, 'utf-8'); 
@@ -1185,11 +1181,12 @@ bot.action(/^rev_(.+)_(.+)$/, async (ctx)=>{
             const lines = content.split('\n'); 
             lines.forEach((l, i) => msg += `*${i+1}.* ${l.substring(0, 30)}...\n`); 
         }
-        msg += `\n👉 Kirim ANGKA (Edit baris) atau TEKS (Smart Fill).\n(Smart Fill hanya mengisi slot KOSONG)`;
+        msg += `\n👉 Kirim ANGKA (Edit baris) atau TEKS (Input Dadakan).`;
     }
     
     adminSession[ctx.from.id]={type:'REVISI', orderId, itemIdx}; 
-    ctx.reply(msg, {parse_mode:'Markdown', ...cancelBtn}); 
+    // Force Reply ditambahkan agar keyboard mengetik muncul di HP
+    ctx.reply(msg, {parse_mode:'Markdown', reply_markup: { force_reply: true }}); 
 });
 
 // [BARU]: HANDLER TOMBOL PAKSA PROSES
