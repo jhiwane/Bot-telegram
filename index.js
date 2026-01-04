@@ -876,27 +876,62 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
     // 🔥 BAGIAN PERINTAH "TANPA SLASH" (DIPANDU) 🔥
     // ===============================================
 
-    // A. FITUR HELP (PANDUAN)
+    // A. FITUR HELP (PANDUAN LENGKAP - VERSI BARU)
     if (textLower === 'help' || textLower === 'bantuan') {
         const msg = `
-📘 **PANDUAN ADMIN JIE STORE**
+📘 **PANDUAN ADMIN JIE STORE (FULL VERSION)**
 
-Ketik kata kunci di bawah ini (Tanpa garis miring):
+Gunakan perintah di bawah ini untuk mengelola Bot & Web:
 
-🔹 **MENU**
-Membuka tombol menu utama.
+=========== 🌐 TAMPILAN WEB ===========
+*Mengatur Notifikasi & Konten Slider*
 
-🔹 **VOUCHER**
-Membuat kode diskon baru secara bertahap.
+📢 **NOTIFIKASI BERJALAN (MARQUEE)**
+• Set: \`/setnotif PESAN | LINK_OPSIONAL\`
+• Hapus: \`/delnotif\`
 
-🔹 **UNBAN**
-Membebaskan user yang terblokir.
+📺 **SLIDER KONTEN (YOUTUBE/LINK)**
+• Tambah: \`/addcontent youtube | JUDUL | ID_VIDEO\`
+• Tambah: \`/addcontent link | JUDUL | URL_WEBSITE\`
+• Hapus Semua: \`/clearcontent\`
+• Hapus Satu-satu: \`/listcontent\`
 
-🔹 **PENCARIAN (LANGSUNG KETIK)**
-- Ketik *Nama/Kode Produk* untuk edit stok.
-- Ketik *Email/UID User* untuk isi saldo.
-- Ketik *ID Order* untuk revisi/cek order.
+🎮 **UPLOAD HTML TOOL / GAMES**
+• Cara: Ketik \`/addhtml JUDUL GAME\`, lalu bot akan minta file .html.
 
+=========== 📦 PRODUK & STOK ===========
+🔹 **TAMBAH PRODUK**
+Ketik \`menu\` -> Klik "TAMBAH PRODUK".
+
+🔹 **EDIT STOK / HARGA**
+Ketik langsung **NAMA PRODUK** atau **KODE** di chat. Nanti muncul tombol Edit.
+
+🔹 **UPLOAD STOK MASSAL**
+Ketik \`menu\` -> Klik "UPLOAD STOK" (Pakai Script Google Sheet).
+
+=========== 👥 USER & SALDO ===========
+🔹 **CEK / EDIT USER**
+Ketik langsung **EMAIL** atau **UID** user di chat.
+(Bisa Topup, Potong Saldo, atau Banned).
+
+🔹 **BUKA BLOKIR (UNBAN)**
+Ketik: \`unban\` (Nanti bot minta UID).
+
+=========== 🎫 VOUCHER & LAINNYA ===========
+🔹 **BUAT VOUCHER DISKON**
+Ketik: \`voucher\` (Ikuti langkah-langkah bot).
+
+🔹 **HAPUS VOUCHER**
+Ketik: \`/delvoucher KODE_VOUCHER\`
+
+🔹 **BACKUP DATABASE**
+Ketik \`menu\` -> Klik "BACKUP DB".
+
+=========== 🤖 AI & KOMPLAIN ===========
+• Bot membalas komplain secara otomatis (Gemini).
+• Jika ingin ambil alih, klik tombol **"AMBIL ALIH"** pada notifikasi komplain yang masuk.
+
+_Tips: Ketik APAPUN (Kode Produk, Order ID, Email) untuk mencari data secara cepat._
 `;
         return ctx.reply(msg, {parse_mode: 'Markdown'});
     }
