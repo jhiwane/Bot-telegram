@@ -154,10 +154,6 @@ bot.use(async (ctx, next) => {
     if (ctx.from) {
         // Jika ID pengirim TIDAK SAMA dengan ADMIN_ID
         if (String(ctx.from.id) !== process.env.ADMIN_ID) {
-            // Opsional: Balas biar mereka tau ini bot private
-            // await ctx.reply("⛔ Akses Ditolak. Ini bot private admin.");
-            
-            // Hentikan proses. Bot tidak akan membaca kode di bawahnya.
             return; 
         }
     }
@@ -300,22 +296,48 @@ const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
     for (let i = 0; i < orderData.items.length; i++) {
         const item = orderData.items[i];
 
+        // --- [PERBAIKAN LOGIKA PERMANEN] ---
+        // Kita cek dulu ke database, apakah produk ini sifatnya PERMANEN?
+        let isItemPermanent = false;
         let sourceContent = "";
         try {
             const prodRef = await db.collection('products').doc(item.id).get();
             if (prodRef.exists) {
                 const prodData = prodRef.data();
                 sourceContent = prodData.content || "";
+                
+                // Cek Variasi
                 if (item.variantName && item.variantName !== 'Regular' && prodData.variations) {
                     const v = prodData.variations.find(va => va.name === item.variantName);
-                    if (v) sourceContent = v.content || "";
+                    if (v) {
+                        sourceContent = v.content || "";
+                        if (v.isPermanent) isItemPermanent = true;
+                    }
+                } else {
+                    // Produk Utama
+                    if (prodData.isPermanent) isItemPermanent = true;
                 }
             }
         } catch (err) { console.log("DB Err:", err); }
 
+        // Cek flag Multi API
+        if (sourceContent.startsWith('MULTI_API:')) isItemPermanent = true;
+
+        // --- JIKA PERMANEN: LANGSUNG EKSEKUSI SUKSES ---
+        // Bypass logika hitung baris
+        if (isItemPermanent) {
+            // Panggil processStock untuk update 'sold' saja
+            const res = await processStock(item.id, item.variantName, item.qty, false);
+            items.push({ ...item, content: res.data });
+            msgLog += `✅ ${item.name}: PERMANEN (Auto)\n`;
+            continue; // Lanjut ke item berikutnya
+        }
+        // ----------------------------------------
+
         // ============================================================
         // TAHAP 1: CEK TIPE PRODUK (MULTI-API SMART)
         // ============================================================
+        // (Logika ini tetap ada sebagai fallback jika content contains MULTI_API tapi lolos check diatas)
         if (sourceContent.startsWith('MULTI_API:')) {
             const apiEntries = sourceContent.replace('MULTI_API:', '').split('#').filter(x => x.trim().length > 5);
             
@@ -418,8 +440,9 @@ const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
                 const currentHave = (forceHunter ? 0 : validLinesCount) + stockFromDB.length;
                 const stillNeed = item.qty - currentHave;
                 let hunterContent = [];
-                // [FIX 1]: Variabel penghitung sukses hunter
-                let hunterSuccessCount = 0; 
+                
+                // [FIX SOLD]: Hitung sukses hunter
+                let hunterSuccessCount = 0;
 
                 // LOGIKA HUNTER (AUTO_BACKUP)
                 if (result.backupConfig && stillNeed > 0) {
@@ -437,14 +460,13 @@ const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
                     }
                 }
                 
-                // [FIX 1]: Update SOLD di Database jika Hunter Sukses
+                // [FIX SOLD]: Update Sold jika hunter sukses
                 if(hunterSuccessCount > 0) {
-                     try {
+                    try {
                         await db.collection('products').doc(item.id).update({
                             sold: admin.firestore.FieldValue.increment(hunterSuccessCount)
                         });
-                        console.log(`✅ Sold +${hunterSuccessCount} dari Hunter`);
-                     } catch(e) { console.log("Gagal update sold hunter:", e.message); }
+                    } catch(e) { console.log("Gagal update sold hunter:", e); }
                 }
 
                 // [FIX]: Gabungkan semua sumber dengan benar
@@ -481,7 +503,6 @@ const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
         revBtns.push([Markup.button.callback('⚡ PROSES PAKSA (REVISI)', `force_send_${orderId}`)]);
         bot.telegram.sendMessage(ADMIN_ID, `⚠️ *PERHATIAN: ORDER ${orderId} BELUM LENGKAP*\nWeb User sudah menampilkan status "Menunggu".\n\n${msgLog}\nSegera isi manual!`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(revBtns) });
     } else {
-        // [FIX 3]: Tombol Edit selalu ada, meskipun order selesai
         bot.telegram.sendMessage(ADMIN_ID, `✅ *ORDER ${orderId} SELESAI*\n${msgLog}`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('🛠 MENU EDIT', `menu_edit_ord_${orderId}`)]]) });
     }
 
@@ -837,7 +858,7 @@ Membebaskan user yang terblokir.
         }
 
         // --- LOGIKA SESI LAMA (ADD PRODUK, REVISI, DLL) ---
-        // [FIX 2]: Logika Edit Manual (Input Dadakan) Menambah Sold
+        // [FIX 1: Logika Edit Manual nambah Sold Count]
         else if (session.type === 'REVISI') {
             if (!isNaN(text) && parseInt(text) > 0 && text.length < 5) {
                 session.targetLine = parseInt(text) - 1; session.type = 'REVISI_LINE_INPUT'; ctx.reply(`🔧 Kirim data baru baris #${text}:`, cancelBtn);
@@ -866,6 +887,8 @@ Membebaskan user yang terblokir.
                         fill += inp.length;
                     }
 
+                    const isAllValid = !item.content.includes('[...MENUNGGU');
+                    
                     // Update Konten
                     item.content = newC.join('\n');
                     
@@ -1186,6 +1209,7 @@ bot.action(/^rev_(.+)_(.+)$/, async (ctx)=>{
     ctx.reply(msg, {parse_mode:'Markdown', reply_markup: { force_reply: true }}); 
 });
 
+// [BARU]: HANDLER TOMBOL PAKSA PROSES
 bot.action(/^force_send_(.+)$/, async (ctx) => {
     const orderId = ctx.match[1];
     await ctx.reply(`⏳ Memproses paksa order ${orderId} ke Supplier/Sheet...`);
