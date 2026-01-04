@@ -175,33 +175,37 @@ const notifyUser = async (targetId, message) => {
     }
 };
 
-// FUNGSI OTAK AI (GEMINI)
-const askGeminiAutoReply = async (complaintText, orderId) => {
+// [BARU] FUNGSI OTAK AI (GEMINI DENGAN MEMORI/CONTEXT)
+const askGeminiChat = async (newMessage, historyDB = []) => {
     try {
         const model = genAI.getGenerativeModel({ model: "gemini-pro" });
         
-        // Setting Perilaku AI (Prompt Engineering)
-        const prompt = `
-        Kamu adalah Customer Service AI yang cerdas dan ramah untuk "Jie Store" (Toko Produk Digital Otomatis).
+        // Konversi format database ke format Gemini
+        let historyGemini = historyDB.map(h => ({
+            role: h.role,
+            parts: [{ text: h.parts }]
+        }));
+
+        const chat = model.startChat({
+            history: historyGemini,
+            generationConfig: { maxOutputTokens: 300 },
+        });
+
+        const systemPrompt = `
+        [INSTRUKSI SISTEM]
+        Kamu adalah CS AI 'Jie Store'.
+        Gaya bicara: Sopan, Santai, Bahasa Indonesia, Solutif.
+        Tugas: Jawab keluhan user singkat & padat. Yakinkan user bahwa admin sedang bekerja.
         
-        Konteks: User dengan Order ID ${orderId} sedang marah/bingung.
-        Keluhan User: "${complaintText}"
-        
-        Tugasmu:
-        1. Jawab dengan bahasa Indonesia yang sopan, santai, dan profesional.
-        2. Minta maaf atas ketidaknyamanan.
-        3. Beritahu bahwa laporan sudah diteruskan ke Admin Utama dan akan segera dicek manual.
-        4. Minta user menunggu sebentar.
-        5. Jawaban harus singkat (maksimal 3 kalimat) dan menenangkan.
+        User bilang: "${newMessage}"
         `;
 
-        const result = await model.generateContent(prompt);
+        const result = await chat.sendMessage(systemPrompt);
         const response = await result.response;
         return response.text();
     } catch (error) {
         console.log("Gemini Error:", error.message);
-        // Fallback jika AI error/limit habis
-        return "Halo kak, mohon maaf atas kendalanya. Laporan kakak sudah masuk ke Admin dan sedang dalam pengecekan manual. Mohon ditunggu sebentar ya 🙏";
+        return "Halo kak, laporan sudah diterima. Mohon tunggu sebentar ya, admin sedang mengeceknya 🙏";
     }
 };
 
@@ -589,38 +593,44 @@ app.post('/api/confirm-manual', async (req, res) => {
 app.post('/api/complain', async (req, res) => {
     const { orderId, message } = req.body;
     
-    // 1. Suruh AI Berpikir Jawabannya
-    const aiReply = await askGeminiAutoReply(message, orderId);
+    // 1. Ambil History Chat
+    const orderRef = db.collection('orders').doc(orderId);
+    const docSnap = await orderRef.get();
+    let chatHistory = [];
+    let buyerPhone = "";
 
-    // 2. Update Database (Simpan komplain & jawaban AI)
-    await db.collection('orders').doc(orderId).update({ 
+    if (docSnap.exists) {
+        const d = docSnap.data();
+        chatHistory = d.chatHistory || []; 
+        buyerPhone = d.buyerPhone;
+    }
+
+    // 2. AI Berpikir
+    const aiReply = await askGeminiChat(message, chatHistory);
+
+    // 3. Update History
+    const newHistory = [
+        ...chatHistory,
+        { role: 'user', parts: message },
+        { role: 'model', parts: aiReply }
+    ];
+
+    await orderRef.update({ 
         complain: true, 
-        complainResolved: true, // Kita anggap 'tertangani' oleh AI dulu
+        complainResolved: true, 
         userComplainText: message,
-        adminReply: `[AI Gemini]: ${aiReply}`
+        adminReply: `[AI]: ${aiReply}`,
+        chatHistory: newHistory
     });
 
-    // 3. Kirim Notifikasi ke Admin (Supaya Admin tau ada masalah)
-    // Admin tetap dikasih tombol MANUAL jika ingin meralat jawaban AI
+    // 4. Notif Admin
     await bot.telegram.sendMessage(ADMIN_ID, 
-        `🤖 *KOMPLAIN (AUTO-REPLY AI)*\n\n🆔 Order: \`${orderId}\`\n💬 *User:* "${message}"\n\n🧠 *Jawab AI:* "${aiReply}"\n\n_Jika jawaban AI kurang pas, klik BALAS MANUAL di bawah._`, 
-        { 
-            parse_mode: 'Markdown',
-            ...Markup.inlineKeyboard([
-                [Markup.button.callback('📩 Ralat / Balas Manual', `reply_comp_${orderId}`)]
-            ])
-        }
+        `🤖 *KOMPLAIN (AI CHAT)*\n🆔 \`${orderId}\`\n💬 *User:* "${message}"\n🧠 *AI:* "${aiReply}"`, 
+        { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('📩 Ambil Alih Manual', `reply_comp_${orderId}`)]]) }
     );
 
-    // 4. Kirim Jawaban AI ke User (Lewat Fungsi notifyUser yang sudah ada)
-    // Di sisi user (Web/WA), mereka akan langsung dapat balasan ini.
-    // Catatan: Jika notifyUser menggunakan Bot Telegram untuk chat ke user, pastikan user pernah start bot.
-    // Jika notifyUser terhubung ke WA Gateway, ini akan terkirim ke WA.
-    const orderSnap = await db.collection('orders').doc(orderId).get();
-    if(orderSnap.exists) {
-        const d = orderSnap.data();
-        await notifyUser(d.buyerPhone, `🤖 *CS Jie Store*\n\n${aiReply}`);
-    }
+    // 5. Balas User
+    await notifyUser(buyerPhone, `🤖 *CS Jie Store*\n\n${aiReply}`);
 
     res.json({ status: 'ok', reply: aiReply });
 });
