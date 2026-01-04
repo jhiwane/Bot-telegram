@@ -220,7 +220,6 @@ const validateOrderSecurity = async (orderId, orderData) => {
     return { isSafe: true };
 };
 
-// [FITUR BARU]: Support forceHunterMode & Deteksi Auto Hunter di Variasi
 // [FIX] LOGIKA STOK: BISA BACA AUTO HUNTER DI VARIASI & MANUAL
 const processStock = async (productId, variantName, qtyNeeded, forceHunterMode = false) => {
     const docRef = db.collection('products').doc(productId);
@@ -537,6 +536,80 @@ const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
                 }
 
                 // Update Sold Count jika hunter berhasil
+// [FIX] LOGIKA ORDER: PENANGANAN QTY BANYAK & TOMBOL EDIT
+const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
+    let items = [], allComplete = true, msgLog = "", revBtns = [];
+
+    for (let i = 0; i < orderData.items.length; i++) {
+        const item = orderData.items[i];
+        
+        // Cek apakah konten sudah aman? (Jika Force Hunter, kita anggap belum aman)
+        const isContentFull = item.content && !item.content.includes('[...MENUNGGU') && !item.content.includes('STOK HABIS');
+        if (isContentFull && !forceHunter) { 
+            items.push(item); 
+            msgLog += `✅ ${item.name}: OK (Aman)\n`; 
+            continue; 
+        }
+
+        // Siapkan wadah baris
+        let currentContentLines = item.content ? item.content.split('\n') : [];
+        if (forceHunter) currentContentLines = []; // Reset jika dipaksa
+
+        // Filter baris yang VALID saja
+        let validLines = currentContentLines.filter(l => 
+            !l.includes('[...MENUNGGU') && !l.includes('STOK HABIS') && !l.includes('GAGAL')
+        );
+        let validLinesCount = validLines.length;
+        let qtyButuh = item.qty - validLinesCount;
+        
+        if (qtyButuh <= 0) { items.push(item); continue; }
+
+        try {
+            // PANGGIL STOK (Manual dulu)
+            const result = await processStock(item.id, item.variantName, qtyButuh, forceHunter);
+            
+            if (result && result.success) {
+                // KASUS A: STOK MANUAL ADA
+                let newContent = result.data;
+                // Gabung: Lama Valid + Baru Manual
+                const finalContent = result.currentStock === 999999 ? newContent : [...validLines, ...newContent.split('\n')].join('\n');
+                items.push({ ...item, content: finalContent });
+                msgLog += `✅ ${item.name}: SUKSES (Gudang)\n`;
+
+            } else if (result && !result.success) {
+                // KASUS B: STOK MANUAL KOSONG -> CARI KE API/SHEET
+                let stockFromDB = [];
+                // Ambil sisa stok manual (jika ada & bukan force)
+                if(result.currentStock > 0 && !forceHunter) {
+                    const partialRes = await processStock(item.id, item.variantName, result.currentStock);
+                    stockFromDB = partialRes.data.split('\n');
+                }
+
+                // Hitung kekurangan (Jangan kurangi 'validLines' jika force, biar ambil baru semua)
+                const currentHave = (forceHunter ? 0 : validLinesCount) + stockFromDB.length;
+                const stillNeed = item.qty - currentHave;
+                
+                let hunterContent = [];
+                let hunterSuccessCount = 0;
+
+                // JALANKAN HUNTER (AUTO BACKUP)
+                if (result.backupConfig && stillNeed > 0) {
+                    const [url, sku] = result.backupConfig.split('|');
+                    if (url && sku) {
+                        console.log(`🤖 Hunter ${item.name}: Mencari ${stillNeed} data...`);
+                        for(let k=0; k<stillNeed; k++) {
+                            const hasil = await beliGeneric(url, sku, orderData.buyerPhone);
+                            if(hasil.sukses) {
+                                hunterContent.push(`${hasil.sn}`); 
+                                hunterSuccessCount++;
+                            } else {
+                                hunterContent.push(`[...MENUNGGU (GAGAL AMBIL: ${hasil.msg})...]`);
+                            }
+                        }
+                    }
+                }
+
+                // Update Sold Count jika hunter berhasil
                 if (hunterSuccessCount > 0) {
                     try { await db.collection('products').doc(item.id).update({ sold: admin.firestore.FieldValue.increment(hunterSuccessCount) }); } catch(e){}
                 }
@@ -591,7 +664,6 @@ const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
 
     if (typeof notifyUser === 'function') await notifyUser(orderData.buyerPhone, userMsg);
 };
-
 // [FITUR BARU]: Fungsi Helper Force Fulfill
 const forceFulfillOrder = async (orderId) => {
     try {
