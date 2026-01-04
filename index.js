@@ -16,7 +16,6 @@ const KEYS = {
     // Tambahkan provider lain di sini jika ada
 };
 
-const PORT = process.env.PORT || 3000;
 const ADMIN_ID = process.env.ADMIN_ID;
 const VIP_ID = process.env.VIP_ID; 
 const VIP_KEY = process.env.VIP_KEY;
