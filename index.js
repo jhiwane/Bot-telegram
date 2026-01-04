@@ -684,29 +684,38 @@ app.post('/api/notify-order', async (req, res) => {
     res.json({ status: 'ok' });
 });
 
-// [BARU] HANDLER ORDER GRATIS (AUTO KLAIM)
+// [UPDATE] API UNTUK KLAIM GRATIS (DENGAN UID)
 app.post('/api/claim-free', async (req, res) => {
-    const { orderId, buyerPhone, itemId, variantName } = req.body;
+    // [FIX] Terima parameter 'uid' dari frontend
+    const { orderId, buyerPhone, itemId, variantName, uid } = req.body;
     
-    // 1. Buat Data Order Dummy
-    const itemData = { id: itemId, variantName: variantName || 'Regular', qty: 1, name: 'FREE ITEM' };
-    
-    // Ambil detail nama produk asli untuk log
+    let name = "FREE ITEM";
     try {
         const pRef = await db.collection('products').doc(itemId).get();
-        if(pRef.exists) itemData.name = pRef.data().name;
+        if(pRef.exists) name = pRef.data().name;
     } catch(e){}
 
-    // 2. Simpan Order Status SUCCESS Langsung
+    const items = [{ id: itemId, variantName: variantName || 'Regular', qty: 1, name: name }];
+    
+    // [FIX] Simpan 'uid' ke database agar Security Rules mengizinkan baca
     await db.collection('orders').doc(orderId).set({
-        items: [itemData],
-        total: 0,
-        buyerPhone: buyerPhone,
-        status: 'success', // Langsung sukses
-        method: 'free',
-        createdAt: new Date(),
+        uid: uid || 'guest', // <--- PENTING!
+        items, 
+        total: 0, 
+        buyerPhone, 
+        status: 'success', 
+        method: 'free', 
+        createdAt: new Date(), 
         processed: false
     });
+
+    bot.telegram.sendMessage(ADMIN_ID, `🎁 *KLAIM GRATIS!* \nUser: ${buyerPhone}\nItem: ${name}`);
+    
+    // Proses kirim barang (konten)
+    await processOrderLogic(orderId, { items, buyerPhone }, false);
+    
+    res.json({ status: 'ok' });
+});
 
     // 3. Trigger Logika Pengiriman Barang (Otomatis)
     await processOrderLogic(orderId, { items: [itemData], buyerPhone }, false);
