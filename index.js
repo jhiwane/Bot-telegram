@@ -689,6 +689,40 @@ app.post('/api/notify-order', async (req, res) => {
     res.json({ status: 'ok' });
 });
 
+// [BARU] HANDLER ORDER GRATIS (AUTO KLAIM)
+app.post('/api/claim-free', async (req, res) => {
+    const { orderId, buyerPhone, itemId, variantName } = req.body;
+    
+    // 1. Buat Data Order Dummy
+    // Kita buat seolah-olah user membeli 1 item
+    const itemData = { id: itemId, variantName: variantName || 'Regular', qty: 1, name: 'FREE ITEM' };
+    
+    // Ambil detail nama produk asli untuk log
+    try {
+        const pRef = await db.collection('products').doc(itemId).get();
+        if(pRef.exists) itemData.name = pRef.data().name;
+    } catch(e){}
+
+    // 2. Simpan Order Status SUCCESS Langsung
+    await db.collection('orders').doc(orderId).set({
+        items: [itemData],
+        total: 0,
+        buyerPhone: buyerPhone,
+        status: 'success', // Langsung sukses
+        method: 'free',
+        createdAt: new Date(),
+        processed: false
+    });
+
+    // 3. Trigger Logika Pengiriman Barang (Otomatis)
+    // Kita panggil fungsi processOrderLogic yang sudah ada
+    // Ini akan mengambil stok/konten dan mengirimnya ke user
+    await processOrderLogic(orderId, { items: [itemData], buyerPhone }, false);
+
+    bot.telegram.sendMessage(ADMIN_ID, `🎁 *KLAIM GRATIS!* \nUser: ${buyerPhone}\nItem: ${itemData.name}`);
+    res.json({ status: 'ok' });
+});
+
 app.get('/', (req, res) => res.send('JSN-02 READY'));
 
 // ==========================================
@@ -705,7 +739,53 @@ const mainMenu = Markup.inlineKeyboard([
 ]);
 
 bot.command('admin', (ctx) => ctx.reply("🛠 *PANEL ADMIN*\nKetik 'help' untuk bantuan.\nKetik APAPUN untuk mencari.", mainMenu));
+// --- FITUR TAMBAHAN (NOTIF & KONTEN) ---
 
+// 1. Set Notifikasi Web: /setnotif Pesan.. | Link..
+bot.command('setnotif', async (ctx) => {
+    const args = ctx.message.text.split(' ').slice(1).join(' ');
+    if(!args) return ctx.reply("Format: /setnotif PESAN PENTING | LINK_TOMBOL (Opsional)");
+    
+    const [msg, link] = args.split('|');
+    await db.collection('settings').doc('announcement').set({
+        text: msg.trim(),
+        link: link ? link.trim() : '',
+        active: true,
+        updatedAt: new Date()
+    });
+    ctx.reply("✅ Notifikasi Web Diupdate!");
+});
+
+// 2. Hapus Notifikasi: /delnotif
+bot.command('delnotif', async (ctx) => {
+    await db.collection('settings').doc('announcement').update({ active: false });
+    ctx.reply("✅ Notifikasi Dimatikan.");
+});
+
+// 3. Tambah Konten Slider (YouTube/Link): /addcontent tipe | judul | url | gambar
+bot.command('addcontent', async (ctx) => {
+    // Tipe: youtube, link, tool
+    const content = ctx.message.text.replace('/addcontent ', '');
+    const [type, title, url, thumb] = content.split('|').map(s=>s.trim());
+    
+    if(!type || !title || !url) return ctx.reply("Format: /addcontent youtube|Judul Video|ID_VIDEO|URL_THUMBNAIL");
+
+    await db.collection('contents').add({
+        type, title, url, 
+        thumbnail: thumb || "https://placehold.co/600x400/000/FFF?text=No+Image",
+        createdAt: new Date()
+    });
+    ctx.reply("✅ Konten Slider Ditambahkan!");
+});
+
+// 4. Hapus Semua Konten: /clearcontent
+bot.command('clearcontent', async (ctx) => {
+    const snap = await db.collection('contents').get();
+    const batch = db.batch();
+    snap.docs.forEach(d => batch.delete(d.ref));
+    await batch.commit();
+    ctx.reply("✅ Semua konten slider dihapus.");
+});
 // ==========================================
 // 4. BOT BRAIN (OTAK BOT - VERSI BARU)
 // ==========================================
