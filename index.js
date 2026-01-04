@@ -7,7 +7,7 @@ const crypto = require('crypto');
 const { GoogleGenerativeAI } = require("@google/generative-ai"); // Import Gemini
 require('dotenv').config();
 
-const botLogic = require('./bot');
+const botExtra = require('./bot_extra');
 
 // ==========================================
 // KONFIGURASI KUNCI API (DARI ENV RAILWAY)
@@ -149,7 +149,8 @@ const db = admin.firestore();
 
 // --- TELEGRAM BOT SETUP ---
 const bot = new Telegraf(process.env.BOT_TOKEN);
-botLogic(bot, db, admin);
+
+botExtra(bot, db, adminSession);
 // ==========================================
 // 🛡️ SECURITY MIDDLEWARE (SATPAM GALAK)
 // ==========================================
