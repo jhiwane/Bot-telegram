@@ -175,37 +175,48 @@ const notifyUser = async (targetId, message) => {
     }
 };
 
-// [BARU] FUNGSI OTAK AI (GEMINI DENGAN MEMORI/CONTEXT)
+// [BAGIAN 1: FUNGSI OTAK AI DENGAN MEMORI]
 const askGeminiChat = async (newMessage, historyDB = []) => {
     try {
         const model = genAI.getGenerativeModel({ model: "gemini-pro" });
         
-        // Konversi format database ke format Gemini
+        // 1. Konversi data database ke format yang dimengerti Gemini
         let historyGemini = historyDB.map(h => ({
             role: h.role,
             parts: [{ text: h.parts }]
         }));
 
+        // 2. Mulai sesi chat dengan membawa riwayat sebelumnya
         const chat = model.startChat({
             history: historyGemini,
-            generationConfig: { maxOutputTokens: 300 },
+            generationConfig: { 
+                maxOutputTokens: 500, // Jawaban bisa lebih panjang dikit biar jelas
+                temperature: 0.7 // Kreativitas sedang (biar ga kaku/static)
+            },
         });
 
-        const systemPrompt = `
-        [INSTRUKSI SISTEM]
-        Kamu adalah CS AI 'Jie Store'.
-        Gaya bicara: Sopan, Santai, Bahasa Indonesia, Solutif.
-        Tugas: Jawab keluhan user singkat & padat. Yakinkan user bahwa admin sedang bekerja.
+        // 3. Instruksi Sistem (Persona CS)
+        // Kita selipkan di setiap pesan agar dia tidak lupa ingatan
+        const systemInstruction = `
+        Bertindaklah sebagai 'Admin Jie Store' (Manusia, bukan Robot).
+        Tugasmu: Melayani komplain pelanggan dengan santai, akrab, tapi tetap sopan.
         
-        User bilang: "${newMessage}"
+        Panduan Jawaban:
+        - Jangan kaku seperti robot. Gunakan bahasa Indonesia yang luwes.
+        - Jika user marah, tenangkan. Jika user bertanya, jelaskan.
+        - Jangan berjanji palsu (misal: "dana sudah balik"), tapi bilang "sedang dicek admin pusat".
+        - Jawablah secara langsung menanggapi kalimat user di bawah ini.
+        
+        User berkata: "${newMessage}"
         `;
 
-        const result = await chat.sendMessage(systemPrompt);
+        const result = await chat.sendMessage(systemInstruction);
         const response = await result.response;
         return response.text();
     } catch (error) {
         console.log("Gemini Error:", error.message);
-        return "Halo kak, laporan sudah diterima. Mohon tunggu sebentar ya, admin sedang mengeceknya 🙏";
+        // Fallback jika AI error/limit habis
+        return "Halo kak, pesan kakak sudah masuk. Mohon tunggu sebentar ya, admin sedang mengecek antrian 🙏";
     }
 };
 
@@ -590,48 +601,54 @@ app.post('/api/confirm-manual', async (req, res) => {
     }
 });
 
+// [BAGIAN 2: HANDLER KOMPLAIN AUTO-PILOT]
 app.post('/api/complain', async (req, res) => {
     const { orderId, message } = req.body;
     
-    // 1. Ambil History Chat
+    // 1. Ambil History Chat dari Database (Agar AI Nyambung)
     const orderRef = db.collection('orders').doc(orderId);
     const docSnap = await orderRef.get();
+    
     let chatHistory = [];
     let buyerPhone = "";
 
     if (docSnap.exists) {
         const d = docSnap.data();
-        chatHistory = d.chatHistory || []; 
+        chatHistory = d.chatHistory || []; // Ambil riwayat chat sebelumnya jika ada
         buyerPhone = d.buyerPhone;
     }
 
-    // 2. AI Berpikir
+    // 2. AI Berpikir (Mengirim pesan baru + history lama)
     const aiReply = await askGeminiChat(message, chatHistory);
 
-    // 3. Update History
+    // 3. Simpan Riwayat Baru ke Database
+    // (Penting: Kita simpan percakapan ini agar nanti kalau user balas lagi, AI ingat)
     const newHistory = [
         ...chatHistory,
-        { role: 'user', parts: message },
-        { role: 'model', parts: aiReply }
+        { role: 'user', parts: message }, // Apa yang user bilang
+        { role: 'model', parts: aiReply } // Apa yang AI jawab
     ];
 
     await orderRef.update({ 
         complain: true, 
-        complainResolved: true, 
+        complainResolved: true, // Dianggap tertangani sementara oleh AI
         userComplainText: message,
         adminReply: `[AI]: ${aiReply}`,
-        chatHistory: newHistory
+        chatHistory: newHistory // Update memori
     });
 
-    // 4. Notif Admin
+    // 4. Notifikasi ke Admin (Untuk pantauan)
     await bot.telegram.sendMessage(ADMIN_ID, 
-        `🤖 *KOMPLAIN (AI CHAT)*\n🆔 \`${orderId}\`\n💬 *User:* "${message}"\n🧠 *AI:* "${aiReply}"`, 
+        `🤖 *KOMPLAIN MASUK (AI MODE)*\n\n🆔 Order: \`${orderId}\`\n💬 *User:* "${message}"\n🧠 *Jawab AI:* "${aiReply}"\n\n_Bot sudah membalas otomatis. Jika jawaban salah, klik tombol di bawah untuk ambil alih._`, 
         { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('📩 Ambil Alih Manual', `reply_comp_${orderId}`)]]) }
     );
 
-    // 5. Balas User
-    await notifyUser(buyerPhone, `🤖 *CS Jie Store*\n\n${aiReply}`);
+    // 5. Kirim Jawaban AI ke User (Lewat WA/Web)
+    if (buyerPhone) {
+        await notifyUser(buyerPhone, `🤖 *CS Jie Store*\n\n${aiReply}`);
+    }
 
+    // Kirim response balik ke Webhook pengirim
     res.json({ status: 'ok', reply: aiReply });
 });
 
