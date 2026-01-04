@@ -141,6 +141,24 @@ const db = admin.firestore();
 
 // --- TELEGRAM BOT SETUP ---
 const bot = new Telegraf(process.env.BOT_TOKEN);
+// ==========================================
+// 🛡️ SECURITY MIDDLEWARE (SATPAM GALAK)
+// ==========================================
+bot.use(async (ctx, next) => {
+    // Cek apakah ada pengirim pesan
+    if (ctx.from) {
+        // Jika ID pengirim TIDAK SAMA dengan ADMIN_ID
+        if (String(ctx.from.id) !== process.env.ADMIN_ID) {
+            // Opsional: Balas biar mereka tau ini bot private
+            // await ctx.reply("⛔ Akses Ditolak. Ini bot private admin.");
+            
+            // Hentikan proses. Bot tidak akan membaca kode di bawahnya.
+            return; 
+        }
+    }
+    // Jika aman (Admin), lanjut ke fungsi berikutnya
+    return next();
+});
 const cancelBtn = Markup.inlineKeyboard([Markup.button.callback('❌ BATAL', 'cancel_action')]);
 
 // ==========================================
