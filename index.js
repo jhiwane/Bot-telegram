@@ -1111,17 +1111,34 @@ Membebaskan user yang terblokir.
             }
             delete adminSession[userId]; ctx.reply("Updated."); return; 
         }
-        else if (session.type === 'EDIT_VAR') { const ref=db.collection('products').doc(session.prodId); const s=await ref.get(); let v=s.data().variations; v[session.varIdx][session.field]=(session.field==='price')?parseInt(text):text; await ref.update({variations:v}); delete adminSession[userId]; ctx.reply("Updated."); return; }
+        // [FIX] BALAS KOMPLAIN MANUAL (UPDATE HISTORY JUGA)
         else if (session.type === 'REPLY_COMPLAIN') { 
-            await db.collection('orders').doc(session.orderId).update({adminReply:text, complainResolved:true}); 
-            // NOTIF BALIK KE USER [UPDATE: Kata-kata sopan]
-            const orderSnap = await db.collection('orders').doc(session.orderId).get();
-            if(orderSnap.exists) {
-                const orderData = orderSnap.data();
-                await notifyUser(orderData.buyerPhone, 
-                    `🔔 *UPDATE KOMPLAIN*\nOrder: \`${session.orderId}\`\n\n💬 *Pesan Admin:*\n"${text}"\n\n_Terima kasih telah menunggu. 🙏_`);
+            const orderRef = db.collection('orders').doc(session.orderId);
+            const docSnap = await orderRef.get();
+            
+            if (docSnap.exists) {
+                const data = docSnap.data();
+                const currentHistory = data.chatHistory || [];
+                
+                // Tambahkan balasan Admin ke History agar muncul di Web User
+                const newHistory = [
+                    ...currentHistory,
+                    { role: 'model', parts: text } // 'model' berarti sisi Admin/AI
+                ];
+
+                await orderRef.update({
+                    adminReply: text, 
+                    complainResolved: true,
+                    chatHistory: newHistory // <--- INI KUNCINYA
+                }); 
+                
+                // Notif ke User
+                await notifyUser(data.buyerPhone, `👤 *Admin Jie Store Membalas:*\n\n"${text}"`);
             }
-            delete adminSession[userId]; ctx.reply("Terkirim."); return; 
+            
+            delete adminSession[ctx.from.id]; 
+            ctx.reply("✅ Balasan terkirim & masuk history chat."); 
+            return; 
         }
     }
 
