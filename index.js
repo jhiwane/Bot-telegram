@@ -20,7 +20,9 @@ const ADMIN_ID = process.env.ADMIN_ID;
 const VIP_ID = process.env.VIP_ID; 
 const VIP_KEY = process.env.VIP_KEY;
 
+// Init Gemini AI
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+
 // ==========================================
 // FUNGSI PINTAR: DETEKSI CREDENTIALS DARI URL
 // ==========================================
@@ -88,7 +90,6 @@ const beliGeneric = async (apiUrl, serviceCode, target) => {
         } 
         
         // SKENARIO 2: URL BEBAS / GRATISAN / SUNTIK (GET REQUEST)
-        // [UPDATE]: Menambahkan penanganan respon Google Apps Script
         else {
             const separator = apiUrl.includes('?') ? '&' : '?';
             const fullUrl = `${apiUrl}${separator}service=${serviceCode}&target=${target}`;
@@ -101,11 +102,10 @@ const beliGeneric = async (apiUrl, serviceCode, target) => {
                         return { sukses: true, sn: res.data || res.content || "Berhasil", msg: "Sukses" };
                     }
                 } else if (typeof res === 'string') {
-                    // Logic Google Sheet: Jika text mengandung STOK_HABIS atau ERROR
+                    // Logic Google Sheet
                     if (res.includes('STOK_HABIS')) return { sukses: false, msg: "Stok Habis di Database Sheet" };
                     if (res.includes('ERROR')) return { sukses: false, msg: "Error Script Google" };
                     
-                    // Jika text valid
                     if (res.length > 2) return { sukses: true, sn: res, msg: "Sukses" };
                 }
             }
@@ -196,7 +196,6 @@ const askGeminiChat = async (newMessage, historyDB = []) => {
         });
 
         // 3. Instruksi Sistem (Persona CS)
-        // Kita selipkan di setiap pesan agar dia tidak lupa ingatan
         const systemInstruction = `
         Bertindaklah sebagai 'Admin Jie Store' (Manusia, bukan Robot).
         Tugasmu: Melayani komplain pelanggan dengan santai, akrab, tapi tetap sopan.
@@ -343,7 +342,6 @@ const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
         const item = orderData.items[i];
 
         // --- [PERBAIKAN LOGIKA PERMANEN] ---
-        // Kita cek dulu ke database, apakah produk ini sifatnya PERMANEN?
         let isItemPermanent = false;
         let sourceContent = "";
         try {
@@ -370,7 +368,6 @@ const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
         if (sourceContent.startsWith('MULTI_API:')) isItemPermanent = true;
 
         // --- JIKA PERMANEN: LANGSUNG EKSEKUSI SUKSES ---
-        // Bypass logika hitung baris
         if (isItemPermanent) {
             // Panggil processStock untuk update 'sold' saja
             const res = await processStock(item.id, item.variantName, item.qty, false);
@@ -383,7 +380,6 @@ const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
         // ============================================================
         // TAHAP 1: CEK TIPE PRODUK (MULTI-API SMART)
         // ============================================================
-        // (Logika ini tetap ada sebagai fallback jika content contains MULTI_API tapi lolos check diatas)
         if (sourceContent.startsWith('MULTI_API:')) {
             const apiEntries = sourceContent.replace('MULTI_API:', '').split('#').filter(x => x.trim().length > 5);
             
@@ -450,7 +446,6 @@ const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
         // ============================================================
         
         const isContentFull = item.content && !item.content.includes('[...MENUNGGU');
-        // Jika forceHunter = true, kita abaikan konten lama dan proses ulang
         if (isContentFull && !forceHunter) { items.push(item); msgLog += `✅ ${item.name}: OK\n`; continue; }
 
         let currentContentLines = item.content ? item.content.split('\n') : [];
@@ -462,7 +457,6 @@ const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
         if (qtyButuh <= 0) { items.push(item); continue; }
 
         try {
-            // [UPDATE]: Panggil processStock dengan forceHunterMode
             const result = await processStock(item.id, item.variantName, qtyButuh, forceHunter);
             
             if (result && result.success) {
@@ -477,7 +471,6 @@ const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
                 // STOK KURANG -> CEK HUNTER
                 let stockFromDB = [];
                 
-                // Ambil stok manual yang ada (jika tidak force)
                 if(result.currentStock > 0 && !forceHunter) {
                     const partialRes = await processStock(item.id, item.variantName, result.currentStock);
                     stockFromDB = partialRes.data.split('\n');
@@ -622,7 +615,6 @@ app.post('/api/complain', async (req, res) => {
     const aiReply = await askGeminiChat(message, chatHistory);
 
     // 3. Simpan Riwayat Baru ke Database
-    // (Penting: Kita simpan percakapan ini agar nanti kalau user balas lagi, AI ingat)
     const newHistory = [
         ...chatHistory,
         { role: 'user', parts: message }, // Apa yang user bilang
@@ -637,18 +629,17 @@ app.post('/api/complain', async (req, res) => {
         chatHistory: newHistory // Update memori
     });
 
-    // 4. Notifikasi ke Admin (Untuk pantauan)
+    // 4. Notifikasi ke Admin
     await bot.telegram.sendMessage(ADMIN_ID, 
         `🤖 *KOMPLAIN MASUK (AI MODE)*\n\n🆔 Order: \`${orderId}\`\n💬 *User:* "${message}"\n🧠 *Jawab AI:* "${aiReply}"\n\n_Bot sudah membalas otomatis. Jika jawaban salah, klik tombol di bawah untuk ambil alih._`, 
         { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('📩 Ambil Alih Manual', `reply_comp_${orderId}`)]]) }
     );
 
-    // 5. Kirim Jawaban AI ke User (Lewat WA/Web)
+    // 5. Kirim Jawaban AI ke User
     if (buyerPhone) {
         await notifyUser(buyerPhone, `🤖 *CS Jie Store*\n\n${aiReply}`);
     }
 
-    // Kirim response balik ke Webhook pengirim
     res.json({ status: 'ok', reply: aiReply });
 });
 
@@ -694,7 +685,6 @@ app.post('/api/claim-free', async (req, res) => {
     const { orderId, buyerPhone, itemId, variantName } = req.body;
     
     // 1. Buat Data Order Dummy
-    // Kita buat seolah-olah user membeli 1 item
     const itemData = { id: itemId, variantName: variantName || 'Regular', qty: 1, name: 'FREE ITEM' };
     
     // Ambil detail nama produk asli untuk log
@@ -715,8 +705,6 @@ app.post('/api/claim-free', async (req, res) => {
     });
 
     // 3. Trigger Logika Pengiriman Barang (Otomatis)
-    // Kita panggil fungsi processOrderLogic yang sudah ada
-    // Ini akan mengambil stok/konten dan mengirimnya ke user
     await processOrderLogic(orderId, { items: [itemData], buyerPhone }, false);
 
     bot.telegram.sendMessage(ADMIN_ID, `🎁 *KLAIM GRATIS!* \nUser: ${buyerPhone}\nItem: ${itemData.name}`);
@@ -734,11 +722,13 @@ const mainMenu = Markup.inlineKeyboard([
     [Markup.button.callback('📄 ISI STOK (UPLOAD)', 'restock_sheet_ask')],
     [Markup.button.callback('👥 PANDUAN USER', 'manage_users'), Markup.button.callback('💳 PAYMENT', 'set_payment')],
     [Markup.button.callback('🎨 GANTI BACKGROUND', 'set_bg')],
+    [Markup.button.callback('📢 ATUR NOTIF', 'menu_notif'), Markup.button.callback('📺 ATUR KONTEN', 'menu_content')], // [BARU]
     [Markup.button.callback('💰 SALES', 'sales_today'), Markup.button.callback('🚨 KOMPLAIN', 'list_complain')],
     [Markup.button.callback('📂 BACKUP DB', 'backup_db'), Markup.button.callback('📥 IMPORT DB', 'import_db_ask')]
 ]);
 
 bot.command('admin', (ctx) => ctx.reply("🛠 *PANEL ADMIN*\nKetik 'help' untuk bantuan.\nKetik APAPUN untuk mencari.", mainMenu));
+
 // --- FITUR TAMBAHAN (NOTIF & KONTEN) ---
 
 // 1. Set Notifikasi Web: /setnotif Pesan.. | Link..
@@ -764,7 +754,6 @@ bot.command('delnotif', async (ctx) => {
 
 // 3. Tambah Konten Slider (YouTube/Link): /addcontent tipe | judul | url | gambar
 bot.command('addcontent', async (ctx) => {
-    // Tipe: youtube, link, tool
     const content = ctx.message.text.replace('/addcontent ', '');
     const [type, title, url, thumb] = content.split('|').map(s=>s.trim());
     
@@ -786,6 +775,16 @@ bot.command('clearcontent', async (ctx) => {
     await batch.commit();
     ctx.reply("✅ Semua konten slider dihapus.");
 });
+
+// 5. Tambah Konten HTML (Mini Apps): /addhtml JUDUL
+bot.command('addhtml', (ctx) => {
+    const title = ctx.message.text.replace('/addhtml', '').trim();
+    if(!title) return ctx.reply("❌ Format Salah. Ketik: /addhtml JUDUL_KONTEN_GAMEMU");
+    
+    adminSession[ctx.from.id] = { type: 'UPLOAD_HTML', title };
+    ctx.reply(`📂 Oke! Sekarang KIRIM FILE .html untuk konten "${title}" ke sini.`);
+});
+
 // ==========================================
 // 4. BOT BRAIN (OTAK BOT - VERSI BARU)
 // ==========================================
@@ -795,16 +794,36 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
     
     // 2. Ambil teks pesan
     let text = "";
-    // LOGIKA IMPORT DB & UPLOAD STOK SHEET
+    const session = adminSession[ctx.from.id];
+
+    // LOGIKA IMPORT DB & UPLOAD STOK SHEET & UPLOAD HTML
     if (ctx.message.document) {
         try { 
-            const session = adminSession[ctx.from.id];
-            const fileLink = await ctx.telegram.getFileLink(ctx.message.document.file_id);
-            const response = await axios.get(fileLink.href);
+            const docFile = ctx.message.document;
+            const fileLink = await ctx.telegram.getFileLink(docFile.file_id);
+            const response = await axios.get(fileLink.href, { responseType: 'text' }); // Baca sebagai text
+
+            // [BARU] LOGIKA UPLOAD HTML TOOLS/GAME
+            if (session && session.type === 'UPLOAD_HTML') {
+                if (!docFile.file_name.endsWith('.html') && !docFile.file_name.endsWith('.htm')) {
+                    return ctx.reply("❌ Harus file .html kawan!");
+                }
+                
+                await db.collection('contents').add({
+                    type: 'html_app',
+                    title: session.title,
+                    htmlContent: response.data,
+                    thumbnail: 'https://placehold.co/600x400/000/FFF?text=HTML+TOOL',
+                    createdAt: new Date()
+                });
+                
+                delete adminSession[ctx.from.id];
+                return ctx.reply(`✅ Konten HTML "${session.title}" Berhasil Disimpan!`);
+            }
 
             if (session && session.type === 'IMPORT_DB') {
                 ctx.reply("⏳ Sedang memproses file backup...");
-                const data = response.data;
+                const data = JSON.parse(response.data);
                 if (!data || typeof data !== 'object') throw new Error("Format JSON salah.");
                 const batchLimit = 400; let batch = db.batch(); let opCount = 0;
                 for (const [collectionName, items] of Object.entries(data)) {
@@ -827,7 +846,6 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
                 const rawData = response.data; 
                 let stockArray = [];
                 if (typeof rawData === 'string') {
-                    // Split per baris, hapus yang kosong
                     stockArray = rawData.split('\n').map(s => s.trim()).filter(s => s.length > 0);
                 }
                 if (stockArray.length === 0) return ctx.reply("❌ File kosong atau bukan text.");
@@ -842,7 +860,7 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
                 } catch(err) { return ctx.reply("❌ Gagal Tembak Script: " + err.message); }
             }
             else {
-                ctx.reply("📂 File diterima (Tapi tidak sedang dalam mode Import/Restock).");
+                ctx.reply("📂 File diterima (Tapi tidak sedang dalam mode Import/Restock/HTML).");
             }
         } catch(e) { return ctx.reply("❌ Gagal Baca File: " + e.message); }
     } else if (ctx.message.photo) {
@@ -853,7 +871,6 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
 
     const textLower = text.toLowerCase();
     const userId = ctx.from.id;
-    const session = adminSession[userId];
 
     // ===============================================
     // 🔥 BAGIAN PERINTAH "TANPA SLASH" (DIPANDU) 🔥
@@ -903,7 +920,6 @@ Membebaskan user yang terblokir.
     // --- FITUR HAPUS VOUCHER MANUAL (PAKAI SLASH) ---
     if (text.startsWith('/delvoucher ')) {
         const parts = text.split(' ');
-        // Pastikan formatnya benar (ada kodenya)
         if (parts.length > 1) {
             const code = parts[1].toUpperCase();
             await db.collection('vouchers').doc(code).delete();
@@ -916,6 +932,19 @@ Membebaskan user yang terblokir.
     // 🧠 LOGIKA SESI (JAWABAN DARI PERTANYAAN BOT)
     // ===============================================
     if (session) {
+        // [BARU] LOGIKA SET NOTIFIKASI
+        if (session.type === 'SET_NOTIF') {
+            await db.collection('settings').doc('announcement').set({ text: text, link: '', active: true, updatedAt: new Date() });
+            delete adminSession[ctx.from.id]; return ctx.reply("✅ Notifikasi Web Diupdate!");
+        }
+        // [BARU] LOGIKA SET KONTEN SLIDER
+        if (session.type === 'ADD_CONTENT') {
+            const [type, title, url] = text.split('|').map(s=>s.trim());
+            if(!url) return ctx.reply("Format Salah. Coba lagi: TIPE | JUDUL | URL");
+            await db.collection('contents').add({ type: type.toLowerCase(), title, url, thumbnail: `https://img.youtube.com/vi/${url}/mqdefault.jpg`, createdAt: new Date() });
+            delete adminSession[ctx.from.id]; return ctx.reply("✅ Konten Slider Ditambah!");
+        }
+
         // [UPDATE]: SESI UPLOAD STOK SHEET
         if (session.type === 'ASK_SHEET_URL') {
             if (!text.includes('script.google.com')) return ctx.reply("❌ URL Salah. Harus link Google Script.", cancelBtn);
@@ -1057,8 +1086,6 @@ Membebaskan user yang terblokir.
                         fill += inp.length;
                     }
 
-                    const isAllValid = !item.content.includes('[...MENUNGGU');
-                    
                     // Update Konten
                     item.content = newC.join('\n');
                     
@@ -1306,6 +1333,10 @@ Membebaskan user yang terblokir.
 });
 
 // --- ACTION HANDLERS ---
+// [BARU] HANDLER TOMBOL MENU BARU
+bot.action('menu_notif', (ctx) => { adminSession[ctx.from.id] = {type:'SET_NOTIF'}; ctx.reply("✍️ Kirim Pesan Notifikasi:", cancelBtn); });
+bot.action('menu_content', (ctx) => { adminSession[ctx.from.id] = {type:'ADD_CONTENT'}; ctx.reply("✍️ Format: youtube | JUDUL | ID_VIDEO", cancelBtn); });
+
 // [UPDATE]: Handler Upload Stok
 bot.action('restock_sheet_ask', (ctx) => { adminSession[ctx.from.id] = { type: 'ASK_SHEET_URL' }; ctx.reply("🔗 Kirim **URL Google Apps Script**:", cancelBtn); });
 
