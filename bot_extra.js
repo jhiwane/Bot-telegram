@@ -1,45 +1,43 @@
-// bot_extra.js - FITUR TAMBAHAN (Cloudinary, Nuke, HTML Tool)
+// bot_extra.js - FITUR EXTRA (Support Semua File & Custom Thumb HTML)
 const { Markup } = require('telegraf');
 const axios = require('axios');
 
 module.exports = (bot, db, adminSession) => {
     const ADMIN_ID = process.env.ADMIN_ID;
 
-    // --- FUNGSI UPLOAD CLOUDINARY ---
+    // --- HELPER CLOUDINARY (SMART AUTO DETECT) ---
     const uploadToCloudinary = async (fileUrl, account) => {
         try {
             const formData = new URLSearchParams();
             formData.append('file', fileUrl);
-            formData.append('upload_preset', account.preset); // Preset Unsigned
-            const cloudName = account.cloudName;
-            const res = await axios.post(`https://api.cloudinary.com/v1_1/${cloudName}/image/upload`, formData);
+            formData.append('upload_preset', account.preset);
+            
+            // PENTING: Pakai 'auto' agar bisa terima APK, PDF, MP3, ZIP
+            const res = await axios.post(`https://api.cloudinary.com/v1_1/${account.cloudName}/auto/upload`, formData);
             return res.data.secure_url;
         } catch (e) {
             throw new Error(e.response?.data?.error?.message || e.message);
         }
     };
 
-    // --- MENU PANEL KEDUA (SUPER ADMIN) ---
+    // --- MENU SUPER ADMIN ---
     const extraMenu = Markup.inlineKeyboard([
-        [Markup.button.callback('☁️ UPLOAD CLOUD', 'menu_cloud_upload'), Markup.button.callback('⚙️ SET AKUN CLOUD', 'menu_cloud_set')],
-        [Markup.button.callback('🎮 UPLOAD HTML GAME', 'ask_html_upload')],
-        [Markup.button.callback('☢️ HAPUS DATABASE (NUKE)', 'menu_danger')]
+        [Markup.button.callback('☁️ UPLOAD FILE (ALL TYPE)', 'menu_cloud_upload'), Markup.button.callback('📂 GALERI SAYA', 'list_my_files')],
+        [Markup.button.callback('⚙️ SET AKUN CLOUD', 'menu_cloud_set'), Markup.button.callback('🎮 UPLOAD HTML APP', 'ask_html_upload')],
+        [Markup.button.callback('☢️ HAPUS DATABASE', 'menu_danger')]
     ]);
 
-    // Command Baru: /superadmin atau /panel2
     bot.command(['superadmin', 'panel2'], (ctx) => {
         if (String(ctx.from.id) !== ADMIN_ID) return;
-        ctx.reply("🚀 **PANEL FITUR TAMBAHAN**\n\nFitur khusus Cloudinary & Database Maintenance.", extraMenu);
+        ctx.reply("🚀 **PANEL EXTRA (ALL FILES)**", extraMenu);
     });
 
-    // Command Cepat Upload: /upload
     bot.command('upload', (ctx) => {
         if (String(ctx.from.id) !== ADMIN_ID) return;
-        ctx.reply("☁️ Pilih akun Cloudinary:", Markup.inlineKeyboard([[Markup.button.callback('☁️ MULAI UPLOAD', 'menu_cloud_upload')]]));
+        ctx.reply("☁️ Pilih akun:", Markup.inlineKeyboard([[Markup.button.callback('☁️ MULAI UPLOAD', 'menu_cloud_upload')]]));
     });
 
-    // --- LOGIKA TEXT & FILE (HANDLING SESSION) ---
-    // Kita "numpang" di listener bot.on index.js lewat adminSession yang dishare
+    // --- LOGIKA PESAN ---
     const handleExtraLogic = async (ctx) => {
         if (String(ctx.from.id) !== ADMIN_ID) return false;
         let text = ctx.message.text || ctx.message.caption || '';
@@ -47,68 +45,81 @@ module.exports = (bot, db, adminSession) => {
 
         if (!session) return false;
 
-        // 1. LOGIKA NUKE (HAPUS SEMUA)
+        // 1. NUKE DB
         if (session.type === 'NUKE_CONFIRM') {
             if (text === 'SAYA YAKIN HAPUS SEMUA') {
-                ctx.reply("☢️ MEMULAI PENGHAPUSAN MASSAL... (JANGAN DIMATIKAN)");
-                const collections = ['products', 'orders', 'users', 'vouchers', 'contents', 'settings', 'cloudinary_accounts'];
+                ctx.reply("☢️ MEMPROSES NUKE...");
+                const cols = ['products', 'orders', 'users', 'vouchers', 'contents', 'settings', 'cloudinary_accounts', 'file_storage'];
                 let count = 0;
-                for (const col of collections) {
+                const batch = db.batch();
+                for (const col of cols) {
                     const snap = await db.collection(col).get();
-                    const batch = db.batch();
                     snap.docs.forEach(doc => batch.delete(doc.ref));
-                    await batch.commit();
                     count += snap.size;
                 }
+                await batch.commit();
                 delete adminSession[ctx.from.id];
-                ctx.reply(`💀 **DATABASE RESET SELESAI.**\nTotal ${count} data dihapus selamanya.`);
-                return true; // Stop processing in index.js
+                ctx.reply(`💀 **RESET SELESAI.** ${count} data dihapus.`);
+                return true;
             }
         }
 
-        // 2. LOGIKA TAMBAH AKUN CLOUD
+        // 2. SET AKUN CLOUD
         if (session.type === 'ADD_CLOUD_ACC') {
             const [name, cloudName, preset] = text.split('|').map(s=>s.trim());
-            if (!name || !cloudName || !preset) {
-                ctx.reply("❌ Format Salah. Ketik: NAMA_AKUN | CLOUD_NAME | PRESET_NAME");
-                return true;
-            }
+            if (!name || !cloudName || !preset) { ctx.reply("❌ Format Salah."); return true; }
             await db.collection('cloudinary_accounts').add({ name, cloudName, preset, createdAt: new Date() });
             delete adminSession[ctx.from.id];
             ctx.reply(`✅ Akun Cloudinary "${name}" Disimpan!`);
             return true;
         }
 
-        // 3. LOGIKA TERIMA FILE UPLOAD CLOUD
-        if ((ctx.message.document || ctx.message.photo) && session.type === 'WAIT_CLOUD_FILE') {
-            ctx.reply("⏳ Sedang mengupload ke Cloudinary...");
+        // 3. PROSES UPLOAD FILE (MP3/APK/PDF/IMG)
+        if ((ctx.message.document || ctx.message.photo || ctx.message.video || ctx.message.audio) && session.type === 'WAIT_CLOUD_FILE') {
+            ctx.reply("⏳ Mengupload (Auto Detect)...");
             try {
-                const fileId = ctx.message.document ? ctx.message.document.file_id : ctx.message.photo[ctx.message.photo.length - 1].file_id;
+                let fileId;
+                // Deteksi jenis file dari Telegram
+                if (ctx.message.document) fileId = ctx.message.document.file_id;
+                else if (ctx.message.video) fileId = ctx.message.video.file_id;
+                else if (ctx.message.audio) fileId = ctx.message.audio.file_id;
+                else if (ctx.message.photo) fileId = ctx.message.photo[ctx.message.photo.length - 1].file_id;
+
                 const fileLink = await ctx.telegram.getFileLink(fileId);
                 const url = await uploadToCloudinary(fileLink.href, session.account);
                 
+                // Simpan ke Galeri Riwayat
+                await db.collection('file_storage').add({
+                    url: url,
+                    account: session.account.name,
+                    createdAt: new Date()
+                });
+
                 delete adminSession[ctx.from.id];
-                ctx.reply(`✅ *UPLOAD SUKSES!*\n\n🔗 URL: \`${url}\`\n\n(Copy link ini untuk produk)`, { parse_mode: 'Markdown' });
+                ctx.reply(`✅ *UPLOAD SUKSES!*\n\n🔗 URL: \`${url}\`\n\n(Bisa untuk Produk/Slider)`, { parse_mode: 'Markdown' });
                 return true;
             } catch (e) {
-                ctx.reply(`❌ Gagal Upload: ${e.message}`);
+                ctx.reply(`❌ Gagal: ${e.message}`);
                 return true;
             }
         }
 
-        // 4. LOGIKA UPLOAD HTML FILE
+        // 4. UPLOAD HTML (DENGAN CUSTOM THUMBNAIL)
         if (ctx.message.document && session.type === 'UPLOAD_HTML_FILE') {
             try {
                 const link = await ctx.telegram.getFileLink(ctx.message.document.file_id);
                 const res = await axios.get(link.href, { responseType: 'text' });
-                if (!ctx.message.document.file_name.endsWith('.html')) {
-                    ctx.reply("❌ Harus file .html"); return true;
+                
+                if (!ctx.message.document.file_name.endsWith('.html')) { 
+                    ctx.reply("❌ Wajib file .html"); return true; 
                 }
+
                 await db.collection('contents').add({
-                    type: 'html_app',
-                    title: session.title,
+                    type: 'html_app', 
+                    title: session.title, 
                     htmlContent: res.data,
-                    thumbnail: 'https://placehold.co/600x400/000/FFF?text=HTML+GAME',
+                    // Gunakan thumbnail user atau default jika kosong
+                    thumbnail: session.thumb || 'https://placehold.co/600x400/000/FFF?text=HTML+GAME', 
                     createdAt: new Date()
                 });
                 delete adminSession[ctx.from.id];
@@ -117,76 +128,76 @@ module.exports = (bot, db, adminSession) => {
             } catch(e) { ctx.reply("Error: "+e.message); return true; }
         }
 
-        return false; // Jika bukan logic di atas, kembalikan ke index.js
+        return false;
     };
 
-    // Kita inject logic ini ke bot middleware agar dibaca sebelum index.js
     bot.use(async (ctx, next) => {
-        if (ctx.message && (ctx.message.text || ctx.message.photo || ctx.message.document)) {
+        if (ctx.message) {
             const handled = await handleExtraLogic(ctx);
-            if (handled) return; // Jika sudah dihandle bot_extra, stop.
+            if (handled) return;
         }
         return next();
     });
 
-    // --- ACTION BUTTONS (TOMBOL KLIK) ---
+    // --- ACTIONS ---
     
-    // 1. Danger Zone
+    bot.action('list_my_files', async (ctx) => {
+        const snap = await db.collection('file_storage').orderBy('createdAt', 'desc').limit(5).get();
+        if (snap.empty) return ctx.reply("📭 Galeri kosong.");
+        ctx.reply("📂 **5 FILE TERAKHIR:**");
+        for (const doc of snap.docs) {
+            const d = doc.data();
+            ctx.reply(`🔗 \`${d.url}\`\n📅 ${d.createdAt.toDate().toLocaleDateString()}`, { parse_mode: 'Markdown' });
+        }
+    });
+
     bot.action('menu_danger', (ctx) => {
-        ctx.reply("⚠️ **DANGER ZONE** ⚠️\n\nHati-hati! Tombol ini menghapus database.", Markup.inlineKeyboard([
-            [Markup.button.callback('💀 HAPUS SEMUA (NUKE)', 'ask_nuke')],
-            [Markup.button.callback('❌ BATAL', 'cancel_action')]
-        ]));
+        ctx.reply("⚠️ **HAPUS DATA**", Markup.inlineKeyboard([ [Markup.button.callback('💀 NUKE SEMUA', 'ask_nuke')], [Markup.button.callback('❌ BATAL', 'cancel_action')] ]));
     });
     bot.action('ask_nuke', (ctx) => {
         adminSession[ctx.from.id] = { type: 'NUKE_CONFIRM' };
-        ctx.reply("⚠️ **PERINGATAN TERAKHIR!**\nKetik kalimat ini untuk konfirmasi:\n`SAYA YAKIN HAPUS SEMUA`", {parse_mode:'Markdown'});
+        ctx.reply("⚠️ Ketik: `SAYA YAKIN HAPUS SEMUA`", {parse_mode:'Markdown'});
     });
 
-    // 2. Cloudinary Settings
     bot.action('menu_cloud_set', async (ctx) => {
         const snap = await db.collection('cloudinary_accounts').get();
-        let msg = "☁️ **AKUN TERDAFTAR:**\n";
-        snap.forEach(d => msg += `- ${d.data().name}\n`);
-        ctx.reply(msg || "Belum ada akun.", Markup.inlineKeyboard([
-            [Markup.button.callback('➕ TAMBAH AKUN', 'add_cloud_acc')],
-            [Markup.button.callback('❌ BATAL', 'cancel_action')]
-        ]));
+        let msg = "☁️ **AKUN:**\n"; snap.forEach(d => msg += `- ${d.data().name}\n`);
+        ctx.reply(msg, Markup.inlineKeyboard([ [Markup.button.callback('➕ TAMBAH', 'add_cloud_acc')], [Markup.button.callback('🔙', 'cancel_action')] ]));
     });
     bot.action('add_cloud_acc', (ctx) => {
         adminSession[ctx.from.id] = { type: 'ADD_CLOUD_ACC' };
-        ctx.reply("✍️ Ketik Data Akun:\nFormat: `NAMA | CLOUD_NAME | PRESET_NAME`", {parse_mode:'Markdown'});
+        ctx.reply("✍️ Format: `NAMA | CLOUD_NAME | PRESET`", {parse_mode:'Markdown'});
     });
 
-    // 3. Upload Flow
     bot.action('menu_cloud_upload', async (ctx) => {
         const snap = await db.collection('cloudinary_accounts').get();
-        if (snap.empty) return ctx.reply("❌ Belum ada akun. Set dulu di menu Setting.");
-        const btns = snap.docs.map(d => [Markup.button.callback(`📤 Pakai: ${d.data().name}`, `use_cloud_${d.id}`)]);
+        if (snap.empty) return ctx.reply("❌ Set Akun Dulu!");
+        const btns = snap.docs.map(d => [Markup.button.callback(`📤 ${d.data().name}`, `use_cloud_${d.id}`)]);
         ctx.reply("Pilih Akun:", Markup.inlineKeyboard(btns));
     });
     bot.action(/^use_cloud_(.+)$/, async (ctx) => {
         const d = await db.collection('cloudinary_accounts').doc(ctx.match[1]).get();
         adminSession[ctx.from.id] = { type: 'WAIT_CLOUD_FILE', account: d.data() };
-        ctx.reply(`📂 Pakai akun ${d.data().name}.\n👉 **Kirim Foto/File sekarang!**`);
+        ctx.reply(`📂 Akun: ${d.data().name}\n👉 Kirim File (APK/PDF/MP3/IMG)!`);
     });
 
-    // 4. HTML Upload
+    // UPLOAD HTML (DENGAN INPUT THUMBNAIL)
     bot.action('ask_html_upload', (ctx) => {
-        ctx.reply("Ketik JUDUL GAME/APPS dulu:");
-        // Kita pakai listener text di index.js untuk menangkap judul, 
-        // tapi biar rapi, kita set session type khusus di sini.
-        // Trik: Kita pakai session 'WAIT_HTML_TITLE' yang nanti ditangkap listener bot.js ini
+        ctx.reply("✍️ Format:\n`JUDUL GAME | URL_GAMBAR_THUMBNAIL`\n\n(Jika tanpa gambar, cukup ketik Judul saja)", {parse_mode:'Markdown'});
         adminSession[ctx.from.id] = { type: 'WAIT_HTML_TITLE' };
     });
-    
-    // Listener tambahan khusus text Judul HTML
     bot.on('text', async (ctx, next) => {
         if (adminSession[ctx.from.id]?.type === 'WAIT_HTML_TITLE') {
-            const title = ctx.message.text;
-            adminSession[ctx.from.id] = { type: 'UPLOAD_HTML_FILE', title };
-            ctx.reply(`📂 Oke judul: "${title}".\nSekarang **Kirim File .html** nya!`);
-            return; // Stop here
+            const raw = ctx.message.text;
+            const [title, thumb] = raw.split('|').map(s=>s.trim());
+            
+            adminSession[ctx.from.id] = { 
+                type: 'UPLOAD_HTML_FILE', 
+                title: title,
+                thumb: thumb || '' // Simpan URL thumb jika ada
+            };
+            ctx.reply(`📂 Judul: "${title}"\n🖼 Thumb: ${thumb ? '✅ Ada' : '❌ Default'}\n\n👉 **Sekarang Kirim File .html!**`);
+            return;
         }
         return next();
     });
