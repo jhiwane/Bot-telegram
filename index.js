@@ -717,12 +717,6 @@ app.post('/api/claim-free', async (req, res) => {
     res.json({ status: 'ok' });
 });
 
-    // 3. Trigger Logika Pengiriman Barang (Otomatis)
-    await processOrderLogic(orderId, { items: [itemData], buyerPhone }, false);
-
-    bot.telegram.sendMessage(ADMIN_ID, `🎁 *KLAIM GRATIS!* \nUser: ${buyerPhone}\nItem: ${itemData.name}`);
-    res.json({ status: 'ok' });
-});
 
 app.get('/', (req, res) => res.send('JSN-02 READY'));
 
