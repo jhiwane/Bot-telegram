@@ -31,40 +31,58 @@ const getCredentialsByUrl = (url) => {
 };
 
 // ==========================================
-// FUNGSI TEMBAK API (GENERIC & SMART)
+// FUNGSI TEMBAK API (UNIVERSAL HUNTER UPGRADED)
 // ==========================================
 const beliGeneric = async (apiUrl, serviceCode, target) => {
     try {
         const creds = getCredentialsByUrl(apiUrl);
-        if (!creds || !creds.key) {
-            return { sukses: false, msg: "API Key tidak ditemukan di ENV." };
-        }
-
-        let payload = {};
-        if (creds.type === 'VIP') {
-            const sign = crypto.createHash('md5').update(creds.id + creds.key).digest("hex");
-            payload = { key: creds.key, sign: sign, type: 'order', service: serviceCode, data_no: target };
-        } 
-        else if (creds.type === 'DIGI') {
-            const sign = crypto.createHash('md5').update(creds.id + creds.key + "depo").digest("hex"); 
-            payload = { username: creds.id, buyer_sku_code: serviceCode, customer_no: target, sign: sign };
-        }
-        else {
-            const sign = crypto.createHash('md5').update(creds.id + creds.key).digest("hex");
-            payload = { key: creds.key, sign: sign, service: serviceCode, target: target };
-        }
-
-        const response = await axios.post(apiUrl, payload);
-        const res = response.data;
-
-        if (res.result === true || (res.data && (res.data.status === 'Pending' || res.data.status === 'Success'))) {
-            return { sukses: true, sn: res.data?.trx_id || res.data?.sn || "Diproses", msg: res.message || "Sukses" };
-        } 
-        else if (res.data && res.data.rc === '00') {
-             return { sukses: true, sn: res.data.sn, msg: "Sukses" };
-        }
         
-        return { sukses: false, msg: res.message || res.data?.message || "Gagal dari Pusat" };
+        // SKENARIO 1: API RESMI (VIP / DIGI)
+        if (creds) {
+            let payload = {};
+            if (creds.type === 'VIP') {
+                const sign = crypto.createHash('md5').update(creds.id + creds.key).digest("hex");
+                payload = { key: creds.key, sign: sign, type: 'order', service: serviceCode, data_no: target };
+            } 
+            else if (creds.type === 'DIGI') {
+                const sign = crypto.createHash('md5').update(creds.id + creds.key + "depo").digest("hex"); 
+                payload = { username: creds.id, buyer_sku_code: serviceCode, customer_no: target, sign: sign };
+            }
+            else { // Default Auth
+                const sign = crypto.createHash('md5').update(creds.id + creds.key).digest("hex");
+                payload = { key: creds.key, sign: sign, service: serviceCode, target: target };
+            }
+
+            const response = await axios.post(apiUrl, payload);
+            const res = response.data;
+
+            if (res.result === true || (res.data && (res.data.status === 'Pending' || res.data.status === 'Success'))) {
+                return { sukses: true, sn: res.data?.trx_id || res.data?.sn || "Diproses", msg: res.message || "Sukses" };
+            } 
+            else if (res.data && res.data.rc === '00') {
+                 return { sukses: true, sn: res.data.sn, msg: "Sukses" };
+            }
+            return { sukses: false, msg: res.message || res.data?.message || "Gagal dari Pusat" };
+        } 
+        
+        // SKENARIO 2: URL BEBAS / GRATISAN / SUNTIK (GET REQUEST)
+        else {
+            const separator = apiUrl.includes('?') ? '&' : '?';
+            const fullUrl = `${apiUrl}${separator}service=${serviceCode}&target=${target}`;
+            const response = await axios.get(fullUrl);
+            const res = response.data;
+
+            if (res) {
+                if (typeof res === 'object') {
+                    if (res.status === true || res.success === true || res.code === 200) {
+                        return { sukses: true, sn: res.data || res.content || "Berhasil", msg: "Sukses" };
+                    }
+                } else if (typeof res === 'string' && res.length > 5) {
+                    return { sukses: true, sn: res, msg: "Sukses" };
+                }
+            }
+            return { sukses: false, msg: "Gagal ambil data URL Bebas" };
+        }
 
     } catch (error) {
         console.error("API Error:", error.message);
@@ -133,10 +151,14 @@ const validateOrderSecurity = async (orderId, orderData) => {
     if (orderData.voucherCode) {
         const vRef = db.collection('vouchers').doc(orderData.voucherCode);
         const vSnap = await vRef.get();
-        if (vSnap.exists && vSnap.data().active) calculatedTotal -= vSnap.data().amount;
+        if (vSnap.exists && vSnap.data().active) {
+            calculatedTotal -= vSnap.data().amount;
+        }
     }
     calculatedTotal = Math.max(0, calculatedTotal);
-    if (orderData.total < (calculatedTotal - 500)) return { isSafe: false, realTotal: calculatedTotal };
+    if (orderData.total < (calculatedTotal - 500)) {
+        return { isSafe: false, realTotal: calculatedTotal };
+    }
     return { isSafe: true };
 };
 
@@ -160,34 +182,28 @@ const processStock = async (productId, variantName, qtyNeeded) => {
             isPermanent = data.isPermanent === true;
         }
 
-        // Cek apakah ada konfigurasi BACKUP API di dalam konten?
-        // Kita anggap format: "STOK_MANUAL...\n... \nAUTO_BACKUP:URL|SKU|PRICE"
+        // Cek Backup Config di baris terakhir
         const hasBackupApi = contentPool.includes('AUTO_BACKUP:');
-        
         if (contentPool.startsWith('MULTI_API:')) isPermanent = true;
 
         const currentSold = parseInt(data.sold) || 0;
         const inc = parseInt(qtyNeeded);
 
-        if (isPermanent && !hasBackupApi) { // Jika murni API atau Permanen biasa
+        if (isPermanent && !hasBackupApi) {
             t.update(docRef, { sold: currentSold + inc });
             return { success: true, data: contentPool, currentStock: 999999 }; 
         } else {
-            // LOGIKA STOK MANUAL / HYBRID
+            // Logika Manual / Hybrid
             let lines = contentPool.split('\n').filter(s => s.trim().length > 0);
-            
-            // Pisahkan mana stok asli, mana konfigurasi Backup
             let stocks = lines.filter(l => !l.startsWith('AUTO_BACKUP:'));
             let backupConfig = lines.find(l => l.startsWith('AUTO_BACKUP:'));
 
             if (stocks.length >= qtyNeeded) {
-                // STOK CUKUP
                 const taken = stocks.slice(0, qtyNeeded); 
                 const remaining = stocks.slice(qtyNeeded);
-                if(backupConfig) remaining.push(backupConfig); // Kembalikan config backup ke DB
+                if(backupConfig) remaining.push(backupConfig); // Keep config
 
                 const finalContent = remaining.join('\n');
-                
                 if (isVariant) {
                     data.variations[variantIndex].content = finalContent;
                     t.update(docRef, { variations: data.variations, sold: currentSold + inc });
@@ -196,7 +212,7 @@ const processStock = async (productId, variantName, qtyNeeded) => {
                 }
                 return { success: true, data: taken.join('\n'), currentStock: stocks.length };
             } else {
-                // STOK KURANG -> Kirim info Backup Config agar "Hunter" bisa bekerja
+                // STOK KURANG -> Kirim sinyal Hunter
                 return { 
                     success: false, 
                     currentStock: stocks.length, 
@@ -213,8 +229,6 @@ const processOrderLogic = async (orderId, orderData) => {
     for (let i = 0; i < orderData.items.length; i++) {
         const item = orderData.items[i];
         let sourceContent = "";
-        
-        // AMBIL DATA PRODUK UNTUK CEK TIPE
         try {
             const prodRef = await db.collection('products').doc(item.id).get();
             if (prodRef.exists) {
@@ -228,7 +242,7 @@ const processOrderLogic = async (orderId, orderData) => {
         } catch(e){}
 
         // ============================================================
-        // MODE 1: MURNI MULTI-API (Stok Unlimited via API)
+        // MODE 1: MULTI-API SMART (MURNI API)
         // ============================================================
         if (sourceContent.startsWith('MULTI_API:')) {
             const apiEntries = sourceContent.replace('MULTI_API:', '').split('#').filter(x => x.trim().length > 5);
@@ -267,7 +281,6 @@ const processOrderLogic = async (orderId, orderData) => {
         // ============================================================
         // MODE 2: STOK MANUAL + AUTO HUNTER (HYBRID)
         // ============================================================
-        
         const isContentFull = item.content && !item.content.includes('[...MENUNGGU');
         if (isContentFull) { items.push(item); msgLog += `✅ ${item.name}: OK\n`; continue; }
 
@@ -277,72 +290,56 @@ const processOrderLogic = async (orderId, orderData) => {
         if (qtyButuh <= 0) { items.push(item); continue; }
 
         try {
-            // PROSES AMBIL STOK MANUAL DULU
             const result = await processStock(item.id, item.variantName, qtyButuh);
             
             if (result && result.success) {
-                // KASUS A: STOK MANUAL CUKUP
+                // STOK CUKUP
                 const validLines = currentContentLines.filter(l => !l.includes('[...MENUNGGU'));
                 let newContent = result.data;
                 const finalContent = result.currentStock === 999999 ? newContent : [...validLines, ...newContent.split('\n')].join('\n');
                 items.push({ ...item, content: finalContent });
-                msgLog += `✅ ${item.name}: SUKSES (Manual)\n`;
+                msgLog += `✅ ${item.name}: SUKSES\n`;
 
             } else if (result && !result.success) {
-                // KASUS B: STOK MANUAL KURANG / KOSONG -> AKTIFKAN "AUTO HUNTER"
-                console.log(`⚠️ Stok Manual Kurang. Cek Backup API...`);
-                
+                // STOK KURANG -> AKTIFKAN HUNTER
                 const validLines = currentContentLines.filter(l => !l.includes('[...MENUNGGU'));
                 let stockFromDB = [];
                 
-                // Ambil sisa stok manual yang berhasil diambil (jika ada)
+                // Ambil stok manual yang ada dulu
                 if(result.currentStock > 0) {
                     const partialRes = await processStock(item.id, item.variantName, result.currentStock);
                     stockFromDB = partialRes.data.split('\n');
                 }
 
-                // Hitung sisa yang masih kurang setelah ambil stok manual
                 const currentHave = validLines.length + stockFromDB.length;
                 const stillNeed = item.qty - currentHave;
-                
-                let hunterSuccess = false;
                 let hunterContent = [];
 
-                // --- LOGIKA BOT "HUNTER" (CARI DATA VALID) ---
+                // LOGIKA HUNTER (AUTO_BACKUP)
                 if (result.backupConfig && stillNeed > 0) {
-                    // Format Backup: URL|SKU|PRICE
                     const [url, sku] = result.backupConfig.split('|');
-                    if (url && sku) {
-                        console.log(`🤖 Hunter Mode Active: Mencari ${stillNeed} item via API Backup...`);
-                        
-                        // Loop beli sebanyak kekurangan
+                    if(url && sku) {
+                        console.log(`🤖 Hunter Active: Mencari ${stillNeed} via Backup...`);
                         for(let k=0; k<stillNeed; k++) {
                             const hasil = await beliGeneric(url, sku, orderData.buyerPhone);
-                            if(hasil.sukses) {
-                                hunterContent.push(`✅ API: ${hasil.sn}`);
-                            } else {
-                                hunterContent.push(`[...MENUNGGU PROSES (API Gagal)...]`);
-                            }
+                            if(hasil.sukses) hunterContent.push(`✅ API: ${hasil.sn}`);
+                            else hunterContent.push(`[...MENUNGGU PROSES (API Gagal)...]`);
                         }
-                        
-                        // Jika ada setidaknya 1 sukses, anggap Hunter bekerja
-                        if(hunterContent.some(c => c.includes('API:'))) hunterSuccess = true;
                     }
                 }
-                // ----------------------------------------------
 
                 let finalLines = [...validLines, ...stockFromDB, ...hunterContent];
                 
-                // Jika Hunter Gagal atau Tidak ada config, isi sisa dengan MENUNGGU
+                // Isi sisa dengan placeholder MENUNGGU
                 const totalSekarang = finalLines.length;
                 const totalKurang = item.qty - totalSekarang;
                 if (totalKurang > 0) {
                     for(let k=0; k<totalKurang; k++) finalLines.push(`[...MENUNGGU ${totalKurang} LAGI...]`);
-                    allComplete = false; // Masih ada yang bolong
+                    allComplete = false; 
                     msgLog += `⚠️ ${item.name}: PARTIAL (Kurang ${totalKurang})\n`;
                     revBtns.push([Markup.button.callback(`🔧 ISI SISA: ${item.name}`, `rev_${orderId}_${i}`)]);
                 } else {
-                    msgLog += `✅ ${item.name}: SUKSES (Hybrid Manual + API)\n`;
+                    msgLog += `✅ ${item.name}: SUKSES (Hybrid)\n`;
                 }
 
                 items.push({ ...item, content: finalLines.join('\n') });
@@ -350,11 +347,11 @@ const processOrderLogic = async (orderId, orderData) => {
         } catch (e) { items.push(item); allComplete = false; msgLog += `❌ ${item.name}: ERROR DB\n`; }
     }
     
-    // TAHAP 4: FINALISASI
+    // TAHAP 4: FINALISASI (MEMAKSA STATUS SUCCESS AGAR MUNCUL DI WEB)
     await db.collection('orders').doc(orderId).update({ items, status: 'success', processed: true });
 
     if (!allComplete) {
-        bot.telegram.sendMessage(ADMIN_ID, `⚠️ *ORDER ${orderId} BELUM LENGKAP*\nWeb User: "Menunggu".\n\n${msgLog}`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(revBtns) });
+        bot.telegram.sendMessage(ADMIN_ID, `⚠️ *ORDER ${orderId} BELUM LENGKAP*\nWeb User status "Menunggu".\n\n${msgLog}`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(revBtns) });
     } else {
         bot.telegram.sendMessage(ADMIN_ID, `✅ *ORDER ${orderId} SELESAI*\n${msgLog}`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('🛠 MENU EDIT', `menu_edit_ord_${orderId}`)]]) });
     }
@@ -377,7 +374,7 @@ app.post('/api/confirm-manual', async (req, res) => {
     try {
         const { orderId, buyerPhone, total, items } = req.body;
         let txt = items.map(i => `- ${i.name} (x${i.qty})`).join('\n');
-        await bot.telegram.sendMessage(ADMIN_ID, `🔔 *MANUAL*\n🆔 \`${orderId}\`\n👤 ${buyerPhone}\n💰 ${parseInt(total).toLocaleString()}\n\n${txt}`, Markup.inlineKeyboard([[Markup.button.callback('⚡ PROSES', `acc_${orderId}`)], [Markup.button.callback('❌ TOLAK', `tolak_${orderId}`)]]));
+        await bot.telegram.sendMessage(ADMIN_ID, `🔔 *ORDER MANUAL*\n🆔 \`${orderId}\`\n👤 ${buyerPhone}\n💰 ${parseInt(total).toLocaleString()}\n\n${txt}`, Markup.inlineKeyboard([[Markup.button.callback('⚡ PROSES', `acc_${orderId}`)], [Markup.button.callback('❌ TOLAK', `tolak_${orderId}`)]]));
         res.status(200).json({ status: 'ok' });
     } catch (error) { res.status(500).json({ status: 'error' }); }
 });
@@ -424,14 +421,14 @@ bot.command('admin', (ctx) => ctx.reply("🛠 *PANEL ADMIN*\nKetik 'help' untuk 
 
 bot.on(['text', 'photo', 'document'], async (ctx, next) => {
     if (String(ctx.from.id) !== ADMIN_ID) return next();
-    let text = "";
     
-    // IMPORT DATABASE LOGIC
+    let text = "";
+    // IMPORT DB LOGIC
     if (ctx.message.document) {
         try { 
             const session = adminSession[ctx.from.id];
             if (session && session.type === 'IMPORT_DB') {
-                ctx.reply("⏳ Sedang memproses file backup...");
+                ctx.reply("⏳ Importing...");
                 const fileLink = await ctx.telegram.getFileLink(ctx.message.document.file_id);
                 const response = await axios.get(fileLink.href);
                 const data = response.data;
@@ -450,7 +447,7 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
                 delete adminSession[ctx.from.id];
                 return ctx.reply("✅ **IMPORT SUKSES!**");
             } else {
-                try { ctx.reply("📂 File diterima."); } catch(e) {}
+                ctx.reply("📂 File diterima.");
             }
         } catch(e) { return ctx.reply("❌ Gagal Import: " + e.message); }
     } else if (ctx.message.photo) {
@@ -463,13 +460,33 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
     const userId = ctx.from.id;
     const session = adminSession[userId];
 
-    if (textLower === 'help' || textLower === 'bantuan') return ctx.reply("Panduan Admin...", {parse_mode: 'Markdown'});
-    if (textLower === 'menu' || textLower === 'admin') return ctx.reply("🛠 *PANEL*", mainMenu);
-    if (textLower === 'voucher') { adminSession[userId] = { type: 'MAKE_VOUCHER', step: 'CODE', data: {} }; return ctx.reply("Kode:", cancelBtn); }
-    if (textLower === 'unban') { adminSession[userId] = { type: 'DO_UNBAN', step: 'UID' }; return ctx.reply("UID:", cancelBtn); }
-    if (text.startsWith('/delvoucher ')) { const p = text.split(' '); if(p.length>1) { await db.collection('vouchers').doc(p[1].toUpperCase()).delete(); return ctx.reply("Deleted."); } }
+    if (textLower === 'help' || textLower === 'bantuan') {
+        const msg = `📘 **PANDUAN ADMIN**\n\n🔹 **MENU**: Buka tombol menu\n🔹 **VOUCHER**: Buat kode diskon\n🔹 **UNBAN**: Lepas blokir user\n🔹 **CARI**: Ketik Nama Produk/Email/Order ID`;
+        return ctx.reply(msg, {parse_mode: 'Markdown'});
+    }
+
+    if (textLower === 'menu' || textLower === 'admin') return ctx.reply("🛠 *PANEL ADMIN*", mainMenu);
+
+    if (textLower === 'voucher') {
+        adminSession[userId] = { type: 'MAKE_VOUCHER', step: 'CODE', data: {} };
+        return ctx.reply("🎫 **BUAT VOUCHER**\n\nKetik KODE:", cancelBtn);
+    }
+
+    if (textLower === 'unban') {
+        adminSession[userId] = { type: 'DO_UNBAN', step: 'UID' };
+        return ctx.reply("🔓 **UNBAN USER**\n\nKetik UID:", cancelBtn);
+    }
+    
+    if (text.startsWith('/delvoucher ')) {
+        const parts = text.split(' ');
+        if (parts.length > 1) {
+            await db.collection('vouchers').doc(parts[1].toUpperCase()).delete();
+            return ctx.reply(`🗑 Voucher dihapus.`);
+        }
+    }
 
     if (session) {
+        // --- ADD VARIATION EXISTING ---
         if (session.type === 'ADD_VAR_EXISTING') {
             const prodRef = db.collection('products').doc(session.prodId);
             const docSnap = await prodRef.get();
@@ -481,7 +498,7 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
             else if (session.step === 'PRICE') { session.tempVar.price = parseInt(text); session.step = 'ASK_API'; ctx.reply("Pakai API? (ya/tidak)", cancelBtn); }
             else if (session.step === 'ASK_API') {
                 if (text.toLowerCase() === 'ya') { session.step = 'INPUT_API'; ctx.reply("Format: URL|KODE|MODAL", cancelBtn); }
-                else { session.step = 'CONTENT'; ctx.reply("Stok Manual (Bisa tambah AUTO_BACKUP: di bawah):", cancelBtn); }
+                else { session.step = 'CONTENT'; ctx.reply("Stok Manual:", cancelBtn); }
             }
             else if (session.step === 'INPUT_API') {
                 if(text.includes('|')) {
@@ -509,11 +526,13 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
             if (session.step === 'CODE') { session.data.code = text.toUpperCase().replace(/\s/g, ''); session.step = 'AMOUNT'; ctx.reply("Nominal:", cancelBtn); } 
             else if (session.step === 'AMOUNT') { await db.collection('vouchers').doc(session.data.code).set({ amount: parseInt(text), active: true, createdAt: new Date() }); delete adminSession[userId]; ctx.reply(`🎉 Voucher Created.`); }
         }
+
         else if (session.type === 'DO_UNBAN') {
             const targetUid = text.trim(); const jailRef = db.collection('banned_users').doc(targetUid); const jailSnap = await jailRef.get();
             if (jailSnap.exists) { await db.collection('users').doc(targetUid).set({ ...jailSnap.data(), restoredAt: new Date() }); await jailRef.delete(); delete adminSession[userId]; ctx.reply(`✅ Unbanned.`); }
             else ctx.reply("❌ Not found.", cancelBtn);
         }
+
         else if (session.type === 'REVISI') {
             if (!isNaN(text) && parseInt(text) > 0 && text.length < 5) {
                 session.targetLine = parseInt(text) - 1; session.type = 'REVISI_LINE_INPUT'; ctx.reply(`🔧 Isi baris #${text}:`, cancelBtn);
@@ -522,7 +541,7 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
                 if(text.includes('|') && text.includes('http')) { item.content = 'MULTI_API:' + text; ctx.reply("✅ API Set."); } 
                 else {
                     let ex = item.content ? item.content.split('\n') : []; let inp = text.split('\n').filter(x=>x.trim()); let newC=[...ex];
-                    for(let i=0; i<newC.length; i++){ if(newC[i].includes('[...MENUNGGU') && inp.length>0){ newC[i] = inp.shift(); } }
+                    for(let i=0; i<newC.length; i++){ if(newC[i].includes('[...MENUNGGU') && inp.length > 0){ newC[i] = inp.shift(); } }
                     if (newC.length === 0 || !item.content.includes('[...MENUNGGU')) item.content = text; else item.content = newC.join('\n');
                     ctx.reply("✅ Data Updated.");
                 }
@@ -533,10 +552,12 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
         else if (session.type === 'REVISI_LINE_INPUT') {
             const d = await db.collection('orders').doc(session.orderId).get(); const data = d.data(); const item = data.items[session.itemIdx];
             let lines = item.content ? item.content.split('\n') : [];
+            // FIX: Handle Baris Kosong
             if (session.targetLine >= lines.length) lines[session.targetLine] = text; else lines[session.targetLine] = text;
             item.content = lines.join('\n'); await db.collection('orders').doc(session.orderId).update({items: data.items}); 
             delete adminSession[userId]; ctx.reply("✅ Baris Updated."); return;
         }
+
         else if (session.type === 'ADD_PROD') {
             const d = session.data;
             if (session.step === 'NAME') { d.name = text; session.step = 'CODE'; ctx.reply("Kode:", cancelBtn); }
@@ -566,6 +587,7 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
             else if (session.step === 'VAR_PERM') { session.tempVar.isPermanent = text.toLowerCase()==='ya'; d.variations.push(session.tempVar); session.step='VARS'; ctx.reply("Var Lain? (ya/tidak)", cancelBtn); }
             return;
         }
+        
         else if (session.type === 'TOPUP_USER') { await db.collection('users').doc(session.targetUid).update({balance:admin.firestore.FieldValue.increment(parseInt(text))}); await notifyUser(session.targetUid, `💰 *TOPUP*\nRp ${parseInt(text).toLocaleString()}`); delete adminSession[userId]; ctx.reply("Done."); return; }
         else if (session.type === 'DEDUCT_USER') { await db.collection('users').doc(session.targetUid).update({balance:admin.firestore.FieldValue.increment(-parseInt(text))}); delete adminSession[userId]; ctx.reply("Done."); return; }
         else if (session.type === 'SET_PAYMENT') {
@@ -604,7 +626,7 @@ bot.on(['text', 'photo', 'document'], async (ctx, next) => {
 // ACTIONS
 bot.action('list_pending', async (ctx) => { const s = await db.collection('orders').where('status', '==', 'pending').get(); if (s.empty) return ctx.reply("Aman."); const btns = s.docs.map(d => [Markup.button.callback(`🆔 ${d.id.slice(0,5)}... | Rp ${d.data().total}`, `acc_${d.id}`)]); ctx.reply("PENDING:", Markup.inlineKeyboard(btns)); });
 bot.action('list_all_stock', async (ctx) => { ctx.reply("Mendata..."); const snap = await db.collection('products').get(); let msg = ""; snap.forEach(doc => { const p = doc.data(); msg += `• ${p.name} (${p.variations?p.variations.length+' var':(p.content?p.content.split('\n').length:0)})\n`; }); ctx.reply(msg || "Kosong."); });
-bot.action('set_bg', (ctx) => { adminSession[ctx.from.id] = { type: 'SET_BG' }; ctx.reply("Kirim URL/Gambar (Multi):", cancelBtn); });
+bot.action('set_bg', (ctx) => { adminSession[ctx.from.id] = { type: 'SET_BG' }; ctx.reply("Kirim Gambar (Multi):", cancelBtn); });
 bot.action('manage_users', (ctx) => ctx.reply("Ketik Email/UID user."));
 bot.action(/^topup_(.+)$/, (ctx)=>{ adminSession[ctx.from.id]={type:'TOPUP_USER', targetUid:ctx.match[1]}; ctx.reply("Nominal:", cancelBtn); });
 bot.action(/^deduct_(.+)$/, (ctx)=>{ adminSession[ctx.from.id]={type:'DEDUCT_USER', targetUid:ctx.match[1]}; ctx.reply("Nominal:", cancelBtn); });
@@ -622,10 +644,8 @@ bot.action(/^del_order_(.+)$/, async (ctx)=>{ await db.collection('orders').doc(
 bot.action('cancel_action', (ctx)=>{ delete adminSession[ctx.from.id]; ctx.reply("Batal."); });
 bot.action('add_prod', (ctx)=>{ adminSession[ctx.from.id]={type:'ADD_PROD', step:'NAME', data:{}}; ctx.reply("Nama:", cancelBtn); });
 bot.action('set_payment', (ctx)=>{ adminSession[ctx.from.id]={type:'SET_PAYMENT', step:'BANK', data:{}}; ctx.reply("Bank:", cancelBtn); });
-// 🔥 UPDATE MENU EDIT UTAMA
 bot.action(/^menu_edit_main_(.+)$/, (ctx) => { const pid = ctx.match[1]; ctx.editMessageText("✏️ *EDIT*", { parse_mode: 'Markdown', ...Markup.inlineKeyboard([ [Markup.button.callback('Nama', `ed_main_name_${pid}`), Markup.button.callback('Harga', `ed_main_price_${pid}`)], [Markup.button.callback('Kode', `ed_main_code_${pid}`), Markup.button.callback('Stok', `ed_main_content_${pid}`)], [Markup.button.callback('Fake Sold', `ed_main_sold_${pid}`), Markup.button.callback('Fake View', `ed_main_view_${pid}`)], [Markup.button.callback('🖼 Gambar (Multi)', `ed_main_images_${pid}`)], [Markup.button.callback('🔙', `back_prod_${pid}`)] ])}); });
 bot.action(/^ed_main_(.+)_(.+)$/, (ctx) => { adminSession[ctx.from.id] = { type: 'EDIT_MAIN', prodId: ctx.match[2], field: ctx.match[1] }; ctx.reply(`Nilai Baru:`, cancelBtn); });
-// 🔥 UPDATE MENU VARIASI (TOMBOL TAMBAH VAR)
 bot.action(/^menu_vars_(.+)$/, async (ctx) => { const pid = ctx.match[1]; const d = await db.collection('products').doc(pid).get(); const vars = d.data().variations || []; const btns = vars.map((v, i) => [Markup.button.callback(`${v.name}`, `sel_var_${pid}_${i}`)]); btns.push([Markup.button.callback('➕ TAMBAH VARIASI', `add_var_${pid}`)]); btns.push([Markup.button.callback('🔙', `back_prod_${pid}`)]); ctx.editMessageText("🔀 *VARIASI:*", { parse_mode: 'Markdown', ...Markup.inlineKeyboard(btns) }); });
 bot.action(/^add_var_(.+)$/, (ctx) => { adminSession[ctx.from.id] = { type: 'ADD_VAR_EXISTING', prodId: ctx.match[1], step: 'NAME' }; ctx.reply("Nama Variasi Baru:", cancelBtn); });
 bot.action(/^sel_var_(.+)_(.+)$/, async (ctx) => { const [_, pid, idx] = ctx.match; const d = await db.collection('products').doc(pid).get(); const v = d.data().variations[idx]; ctx.editMessageText(`🔀 ${v.name}`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard([ [Markup.button.callback('Nama', `ed_var_name_${pid}_${idx}`), Markup.button.callback('Harga', `ed_var_price_${pid}_${idx}`)], [Markup.button.callback('Stok', `ed_var_content_${pid}_${idx}`)], [Markup.button.callback('🗑️', `del_var_${pid}_${idx}`), Markup.button.callback('🔙', `menu_vars_${pid}`)] ])}); });
@@ -634,7 +654,7 @@ bot.action(/^del_var_(.+)_(.+)$/, async (ctx) => { const [_, pid, idx] = ctx.mat
 bot.action(/^menu_edit_ord_(.+)$/, async (ctx) => { const oid = ctx.match[1]; const doc = await db.collection('orders').doc(oid).get(); const items = doc.data().items; const btns = items.map((item, idx) => [Markup.button.callback(`✏️ ${item.name}`, `rev_${oid}_${idx}`)]); ctx.reply(`🛠 Pilih item:`, Markup.inlineKeyboard(btns)); });
 bot.action(/^rev_(.+)_(.+)$/, async (ctx)=>{ const orderId = ctx.match[1]; const itemIdx = parseInt(ctx.match[2]); const d = await db.collection('orders').doc(orderId).get(); const item = d.data().items[itemIdx]; const content = item.content || ""; let msg = `🔧 *EDIT: ${item.name}*\n\n`; if (content.length > 3000) { const buffer = Buffer.from(content, 'utf-8'); await ctx.replyWithDocument({ source: buffer, filename: `data.txt` }, { caption: "📂 Data panjang." }); msg += "👉 Data via file.\n"; } else { const lines = content.split('\n'); lines.forEach((l, i) => msg += `*${i+1}.* ${l.substring(0, 30)}...\n`); } msg += `\n👉 Kirim ANGKA (Edit baris) atau TEKS (Smart Fill).`; adminSession[ctx.from.id]={type:'REVISI', orderId, itemIdx}; ctx.reply(msg, {parse_mode:'Markdown', ...cancelBtn}); });
 
-// 🔥 BACKUP & IMPORT HANDLER
+// BACKUP & IMPORT HANDLER
 bot.action('backup_db', async (ctx) => {
     ctx.reply("⏳ Creating backup...");
     const collections = ['products', 'users', 'orders', 'vouchers', 'settings'];
