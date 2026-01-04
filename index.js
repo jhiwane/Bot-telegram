@@ -418,7 +418,8 @@ const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
                 const currentHave = (forceHunter ? 0 : validLinesCount) + stockFromDB.length;
                 const stillNeed = item.qty - currentHave;
                 let hunterContent = [];
-                let hunterSuccessCount = 0; // [FIX 2: Hitung sukses hunter]
+                // [FIX 1]: Variabel penghitung sukses hunter
+                let hunterSuccessCount = 0; 
 
                 // LOGIKA HUNTER (AUTO_BACKUP)
                 if (result.backupConfig && stillNeed > 0) {
@@ -436,13 +437,14 @@ const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
                     }
                 }
                 
-                // [FIX 2: Update Sold saat Hunter Sukses]
+                // [FIX 1]: Update SOLD di Database jika Hunter Sukses
                 if(hunterSuccessCount > 0) {
-                    try {
+                     try {
                         await db.collection('products').doc(item.id).update({
                             sold: admin.firestore.FieldValue.increment(hunterSuccessCount)
                         });
-                    } catch(e) { console.log("Gagal update sold hunter:", e); }
+                        console.log(`✅ Sold +${hunterSuccessCount} dari Hunter`);
+                     } catch(e) { console.log("Gagal update sold hunter:", e.message); }
                 }
 
                 // [FIX]: Gabungkan semua sumber dengan benar
@@ -471,19 +473,22 @@ const processOrderLogic = async (orderId, orderData, forceHunter = false) => {
     // TAHAP 4: FINALISASI & NOTIFIKASI
     // ============================================================
     
+    // [UPDATE]: Status selalu success agar muncul di web, walau isi "Menunggu"
     await db.collection('orders').doc(orderId).update({ items, status: 'success', processed: true });
 
     if (!allComplete) {
+        // [UPDATE]: Jika belum lengkap, kasih tombol Force Send juga
         revBtns.push([Markup.button.callback('⚡ PROSES PAKSA (REVISI)', `force_send_${orderId}`)]);
         bot.telegram.sendMessage(ADMIN_ID, `⚠️ *PERHATIAN: ORDER ${orderId} BELUM LENGKAP*\nWeb User sudah menampilkan status "Menunggu".\n\n${msgLog}\nSegera isi manual!`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard(revBtns) });
     } else {
-        // [FIX 3: Tombol Edit selalu ada meskipun sukses]
+        // [FIX 3]: Tombol Edit selalu ada, meskipun order selesai
         bot.telegram.sendMessage(ADMIN_ID, `✅ *ORDER ${orderId} SELESAI*\n${msgLog}`, { parse_mode: 'Markdown', ...Markup.inlineKeyboard([[Markup.button.callback('🛠 MENU EDIT', `menu_edit_ord_${orderId}`)]]) });
     }
 
     let userMsg = `✅ *PESANAN SELESAI!*\n🆔 Order: \`${orderId}\`\n\n`;
     items.forEach(item => {
         let clean = item.content.replace('MULTI_API:', '').replace(/AUTO_BACKUP:.*?\|.*?\|.*?/g, '');
+        // Bersihkan tanda MENUNGGU agar di chat WA user tidak aneh
         let contentClean = clean.replace(/\[\.\.\.MENUNGGU.*?\]/g, '_(Sedang diproses/Menunggu Pembayaran)_').replace(/\n/g, '\n'); 
         userMsg += `📦 *${item.name}*\n\`${contentClean}\`\n\n`;
     });
@@ -832,7 +837,7 @@ Membebaskan user yang terblokir.
         }
 
         // --- LOGIKA SESI LAMA (ADD PRODUK, REVISI, DLL) ---
-        // [FIX 1: Logika Edit Manual nambah Sold Count]
+        // [FIX 2]: Logika Edit Manual (Input Dadakan) Menambah Sold
         else if (session.type === 'REVISI') {
             if (!isNaN(text) && parseInt(text) > 0 && text.length < 5) {
                 session.targetLine = parseInt(text) - 1; session.type = 'REVISI_LINE_INPUT'; ctx.reply(`🔧 Kirim data baru baris #${text}:`, cancelBtn);
@@ -861,8 +866,6 @@ Membebaskan user yang terblokir.
                         fill += inp.length;
                     }
 
-                    const isAllValid = !item.content.includes('[...MENUNGGU');
-                    
                     // Update Konten
                     item.content = newC.join('\n');
                     
@@ -1163,9 +1166,26 @@ bot.action(/^menu_edit_ord_(.+)$/, async (ctx) => { const oid = ctx.match[1]; co
     btns.push([Markup.button.callback('⚡ PROSES DATA (REVISI OTOMATIS)', `force_send_${oid}`)]);
     ctx.reply(`🛠 Pilih item:`, Markup.inlineKeyboard(btns)); 
 });
-bot.action(/^rev_(.+)_(.+)$/, async (ctx)=>{ const orderId = ctx.match[1]; const itemIdx = parseInt(ctx.match[2]); const d = await db.collection('orders').doc(orderId).get(); const item = d.data().items[itemIdx]; const content = item.content || ""; let msg = `🔧 *EDIT: ${item.name}*\n\n`; if (content.length > 3000) { const buffer = Buffer.from(content, 'utf-8'); await ctx.replyWithDocument({ source: buffer, filename: `data.txt` }, { caption: "📂 Data panjang." }); msg += "👉 Data via file.\n"; } else { const lines = content.split('\n'); lines.forEach((l, i) => msg += `*${i+1}.* ${l.substring(0, 30)}...\n`); } msg += `\n👉 Kirim ANGKA (Edit baris) atau TEKS (Smart Fill).`; adminSession[ctx.from.id]={type:'REVISI', orderId, itemIdx}; ctx.reply(msg, {parse_mode:'Markdown', ...cancelBtn}); });
 
-// [BARU]: HANDLER TOMBOL PAKSA PROSES
+// [FIX 3]: Handler Tombol Edit (Revisi) dengan Force Reply
+bot.action(/^rev_(.+)_(.+)$/, async (ctx)=>{ 
+    const orderId = ctx.match[1]; 
+    const itemIdx = parseInt(ctx.match[2]); 
+    const d = await db.collection('orders').doc(orderId).get(); 
+    const item = d.data().items[itemIdx]; 
+    const content = item.content || ""; 
+    
+    let msg = `🔧 *EDIT: ${item.name}*\n\n`; 
+    if (content.length > 2000) msg += "👉 Data terlalu panjang (Cek file).\n"; 
+    else msg += `Data:\n\`${content}\`\n`;
+    
+    msg += `\n👉 **SILAKAN REPLY PESAN INI** dengan data akun baru.\nBot akan menimpa slot 'MENUNGGU' dan menambah counter SOLD.`;
+    
+    adminSession[ctx.from.id] = {type:'REVISI', orderId, itemIdx}; 
+    // Force Reply agar keyboard ngetik muncul
+    ctx.reply(msg, {parse_mode:'Markdown', reply_markup: { force_reply: true }}); 
+});
+
 bot.action(/^force_send_(.+)$/, async (ctx) => {
     const orderId = ctx.match[1];
     await ctx.reply(`⏳ Memproses paksa order ${orderId} ke Supplier/Sheet...`);
