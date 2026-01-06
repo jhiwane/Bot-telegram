@@ -1246,20 +1246,27 @@ _Tips: Ketik APAPUN (Kode Produk, Order ID, Email) untuk mencari data secara cep
             return;
         }
         else if (session.type === 'SET_BG') { 
-            const raw = ctx.message.photo ? ctx.message.photo[ctx.message.photo.length - 1].file_id : text;
-            const urls = raw.split(/[\n,]+/).map(u=>u.trim()).filter(u=>u);
-            await db.collection('settings').doc('layout').set({ backgroundUrls: urls }, { merge: true }); 
-            delete adminSession[userId]; ctx.reply(`✅ Background Diupdate (${urls.length} gambar).`); return; 
-        }
-        else if (session.type === 'EDIT_MAIN') { 
-            if (session.field === 'images') {
-                const urls = text.split(/[\n,]+/).map(u=>u.trim()).filter(u=>u);
-                await db.collection('products').doc(session.prodId).update({ images: urls, image: urls[0] || "" });
-            } else {
-                await db.collection('products').doc(session.prodId).update({[session.field]:(session.field.includes('price')||session.field.includes('sold'))?parseInt(text):text}); 
-            }
-            delete adminSession[userId]; ctx.reply("Updated."); return; 
-        }
+    // 1. CEGAH KIRIM FOTO LANGSUNG (Biar Web Gak Error)
+    if (ctx.message.photo) {
+        return ctx.reply("❌ JANGAN KIRIM FOTO LANGSUNG!\nWeb tidak bisa baca file Telegram.\n\n👉 Silakan upload dulu di menu /upload, lalu copy-paste LINK URL-nya ke sini.");
+    }
+
+    // 2. AMBIL TEKS URL
+    const raw = text; 
+
+    // 3. PROSES SPLIT (ENTER/KOMA)
+    // Filter u => u.includes('http') memastikan yang masuk cuma link valid
+    const urls = raw.split(/[\n,]+/).map(u => u.trim()).filter(u => u.includes('http'));
+
+    if (urls.length === 0) return ctx.reply("❌ Link tidak valid. Pastikan ada 'http' nya.");
+
+    // 4. SIMPAN KE DB
+    await db.collection('settings').doc('layout').set({ backgroundUrls: urls }, { merge: true }); 
+    
+    delete adminSession[userId]; 
+    ctx.reply(`✅ Sukses! ${urls.length} Background diupdate.`); 
+    return; 
+}
         // [FIX] BALAS KOMPLAIN MANUAL (UPDATE HISTORY JUGA)
         else if (session.type === 'REPLY_COMPLAIN') { 
             const orderRef = db.collection('orders').doc(session.orderId);
